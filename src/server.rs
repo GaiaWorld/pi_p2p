@@ -1,27 +1,21 @@
-use std::any::Any;
 use std::io::Result;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
 
 use mqtt3::{self};
+use rand::prelude::*;
+use fnv::FnvHashMap;
 
 use handle_server::GetAddr;
 use traits::P2PServerTraits;
-
-use fnv::FnvHashMap;
-
 use net::{Config, NetManager, Protocol, Socket, Stream};
 use rpc::server::RPCServer;
 use rpc::traits::RPCServerTraits;
-
 use mqtt::server::ServerNode;
 use mqtt::util;
-
 use pi_lib::atom::Atom;
-use pi_lib::handler::Handler;
-
-use rand::prelude::*;
+use pi_lib::handler::{Args, Handler};
+use pi_lib::gray::GrayVersion;
 
 pub struct P2PServer {
     rpc: Arc<RwLock<RPCServer>>,
@@ -76,33 +70,33 @@ fn handle_bind(
     }
 
     rpc.add_stream(socket, stream);
-    rpc.set_attr(Box::new(
-        move |attr: &mut FnvHashMap<Atom, Arc<Any>>, _socket: Socket, connect: mqtt3::Connect| {
-            if let Some(username) = connect.username {
-                attr.insert(Atom::from("$username"), Arc::new(Vec::from(username)));
-            }
-            if let Some(password) = connect.password {
-                attr.insert(Atom::from("$password"), Arc::new(Vec::from(password)));
-            }
-            attr.insert(
-                Atom::from("$client_id"),
-                Arc::new(Vec::from(connect.client_id)),
-            );
-            attr.insert(
-                Atom::from("$connect_time"),
-                Arc::new(Vec::from(
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        .to_string(),
-                )),
-            );
+    // rpc.set_attr(Box::new(
+    //     move |attr: &mut FnvHashMap<Atom, Arc<Any>>, _socket: Socket, connect: mqtt3::Connect| {
+    //         if let Some(username) = connect.username {
+    //             attr.insert(Atom::from("$username"), Arc::new(Vec::from(username)));
+    //         }
+    //         if let Some(password) = connect.password {
+    //             attr.insert(Atom::from("$password"), Arc::new(Vec::from(password)));
+    //         }
+    //         attr.insert(
+    //             Atom::from("$client_id"),
+    //             Arc::new(Vec::from(connect.client_id)),
+    //         );
+    //         attr.insert(
+    //             Atom::from("$connect_time"),
+    //             Arc::new(Vec::from(
+    //                 SystemTime::now()
+    //                     .duration_since(SystemTime::UNIX_EPOCH)
+    //                     .unwrap()
+    //                     .as_secs()
+    //                     .to_string(),
+    //             )),
+    //         );
 
-            println!("pi_p2p server attr insert peer_list");
-            attr.insert(Atom::from("peer_list"), peer_list.clone() as Arc<Any>);
-        },
-    )).is_ok();
+    //         println!("pi_p2p server attr insert peer_list");
+    //         attr.insert(Atom::from("peer_list"), peer_list.clone() as Arc<Any>);
+    //     },
+    // )).is_ok();
     // let topic_handle = Handle::new();
     // //通过rpc注册topic
     // rpc.register(Atom::from(String::from("a/b/c").as_str()), true, Arc::new(topic_handle)).is_ok();
@@ -141,6 +135,61 @@ impl P2PServer {
     }
 }
 
+pub struct RpcHandler {
+    pub handler: Arc<Handler<
+        A = Arc<RwLock<FnvHashMap<SocketAddr, u64>>>,
+        B = (),
+        C = (),
+        D = (),
+        E = (),
+        F = (),
+        G = (),
+        H = (),
+        HandleResult = ()
+    >>,
+    pub peer_list: Arc<RwLock<FnvHashMap<SocketAddr, u64>>>
+}
+
+impl RpcHandler {
+    pub fn new(h: Arc<Handler<
+        A = Arc<RwLock<FnvHashMap<SocketAddr, u64>>>,
+        B = (),
+        C = (),
+        D = (),
+        E = (),
+        F = (),
+        G = (),
+        H = (),
+        HandleResult = ()
+    >>, peer_list: Arc<RwLock<FnvHashMap<SocketAddr, u64>>>) -> Self {
+        RpcHandler{
+            handler:h,
+            peer_list
+        }
+    }
+}
+
+impl Handler for RpcHandler {
+    type A = u8;
+    type B = Arc<Vec<u8>>;
+    type C = ();
+    type D = ();
+    type E = ();
+    type F = ();
+    type G = ();
+    type H = ();
+    type HandleResult = ();
+    fn handle(
+        &self,
+        session: Arc<dyn GrayVersion>,
+        atom: Atom,
+        _args: Args<Self::A, Self::B, Self::C, Self::D, Self::E, Self::F, Self::G, Self::H>,
+    ) -> Self::HandleResult {
+        self.handler.handle(session, atom, Args::OneArgs(self.peer_list.clone()));
+    }
+}
+
+
 impl P2PServerTraits for P2PServer {
     fn register(
         &self,
@@ -148,8 +197,8 @@ impl P2PServerTraits for P2PServer {
         sync: bool,
         handle: Arc<
             Handler<
-                A = u8,
-                B = Arc<Vec<u8>>,
+                A = Arc<RwLock<FnvHashMap<SocketAddr, u64>>>,
+                B = (),
                 C = (),
                 D = (),
                 E = (),
@@ -160,7 +209,8 @@ impl P2PServerTraits for P2PServer {
             >,
         >,
     ) -> Result<()> {
-        self.rpc.write().unwrap().register(topic, sync, handle)
+        let h = RpcHandler::new(handle, self.peer_list.clone());
+        self.rpc.write().unwrap().register(topic, sync, Arc::new(h))
     }
 
     fn unregister(&self, topic: Atom) -> Result<()> {

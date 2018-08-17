@@ -1,10 +1,12 @@
-use pi_lib::handler::Handler;
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use std::io::Result;
 
+use fnv::FnvHashMap;
+
+use pi_lib::handler::Handler;
 use pi_lib::atom::Atom;
 use net::Socket;
-
-use std::io::Result;
-use std::sync::Arc;
 
 pub trait P2PClientTraits {
     // 最终变为：$r，payload: params
@@ -24,8 +26,8 @@ pub trait P2PServerTraits {
         sync: bool,
         handle: Arc<
             Handler<
-                A = u8,
-                B = Arc<Vec<u8>>,
+                A = Arc<RwLock<FnvHashMap<SocketAddr, u64>>>,
+                B = (),
                 C = (),
                 D = (),
                 E = (),
