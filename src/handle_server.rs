@@ -6,7 +6,8 @@ use fnv::FnvHashMap;
 use serde_json;
 
 use pi_lib::atom::Atom;
-use pi_lib::handler::{Args, Env, GenType, Handler};
+use pi_lib::handler::{Args, Handler};
+use pi_lib::gray::GrayVersion;
 
 use mqtt::session::Session;
 
@@ -27,8 +28,8 @@ impl GetAddr {
 }
 
 impl Handler for GetAddr {
-    type A = u8;
-    type B = Arc<Vec<u8>>;
+    type A = Arc<RwLock<FnvHashMap<SocketAddr, u64>>>;
+    type B = ();
     type C = ();
     type D = ();
     type E = ();
@@ -38,34 +39,21 @@ impl Handler for GetAddr {
     type HandleResult = ();
     fn handle(
         &self,
-        session: Arc<dyn Env>,
+        session: Arc<dyn GrayVersion>,
         atom: Atom,
         args: Args<Self::A, Self::B, Self::C, Self::D, Self::E, Self::F, Self::G, Self::H>,
     ) -> Self::HandleResult {
         let mut peers = Vec::new();
-        unsafe {
-            let peer_list = session.get_attr(Atom::from("peer_list")).unwrap();
-            if let GenType::Pointer(peer_list) = peer_list {
-                let peer_list = Arc::from_raw(peer_list);
-                let peer_list: Option<&RwLock<FnvHashMap<SocketAddr, u64>>> = peer_list.downcast_ref();
-                if let Some(peer_list) = peer_list
-                {
-                    let peer_list = peer_list.read().unwrap();
-                    for (k, v) in peer_list.iter() {
-                        peers.push((k.clone(), v.clone()));
-                    }
-                } else {
+        match args {
+            Args::OneArgs(p) => {
+                let peer_list = p.read().unwrap();
+                for (k, v) in peer_list.iter() {
+                    peers.push((k.clone(), v.clone()));
                 }
-            }
-        }
+            },
+            _ => panic!("GetAddr need only one arg"),
+        };
         let v = serde_json::to_string(&peers).unwrap();
-        if let Args::TwoArgs(_vsn, msg) = args {
-            println!(
-                "topic_handle!!!!!!!atom:{}, msg:{:?}",
-                *atom,
-                String::from_utf8(msg.to_vec())
-            );
-        }
         unsafe {
             let session = Arc::from_raw(Arc::into_raw(session) as *const Session);
             session.respond(atom, v.into_bytes());

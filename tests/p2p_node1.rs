@@ -5,19 +5,12 @@ extern crate net;
 
 
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
-use std::thread::{self, sleep};
+use std::thread::{sleep};
 use std::time::Duration;
 
 use fnv::FnvHashMap;
-use net::Socket;
 
 use pi_p2p::manage::P2PManage;
-
-use pi_p2p::client::P2PClient;
-use pi_p2p::server::P2PServer;
-
-use rand::prelude::*;
 
 
 #[test]
