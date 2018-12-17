@@ -5,9 +5,9 @@ use std::time::SystemTime;
 use fnv::FnvHashMap;
 use serde_json;
 
-use pi_lib::atom::Atom;
-use pi_lib::handler::{Args, Handler};
-use pi_lib::gray::GrayVersion;
+use atom::Atom;
+use handler::{Args, Handler};
+use gray::GrayVersion;
 
 use mqtt::session::Session;
 

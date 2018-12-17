@@ -15,7 +15,7 @@ use rpc::traits::RPCClientTraits;
 
 use mqtt::client::ClientNode;
 
-use pi_lib::atom::Atom;
+use atom::Atom;
 
 pub struct P2PClient {
     rpc: Arc<RPCClient>,

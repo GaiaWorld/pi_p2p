@@ -13,9 +13,9 @@ use rpc::server::RPCServer;
 use rpc::traits::RPCServerTraits;
 use mqtt::server::ServerNode;
 use mqtt::util;
-use pi_lib::atom::Atom;
-use pi_lib::handler::{Args, Handler};
-use pi_lib::gray::GrayVersion;
+use atom::Atom;
+use handler::{Args, Handler};
+use gray::GrayVersion;
 
 pub struct P2PServer {
     rpc: Arc<RwLock<RPCServer>>,

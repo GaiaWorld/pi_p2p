@@ -9,7 +9,7 @@ use client::P2PClient;
 use server::P2PServer;
 use traits::P2PServerTraits;
 
-use pi_lib::atom::Atom;
+use atom::Atom;
 use rand::prelude::*;
 
 pub struct P2PManage {

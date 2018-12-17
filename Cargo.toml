@@ -9,6 +9,8 @@ mqtt = {path = "../pi_net/mqtt"}
 mqtt3 = { git = "https://github.com/tekjar/mqtt3" }
 rpc = {path = "../pi_net/rpc"}
 net = {path = "../pi_net/net"}
-pi_lib = {path="../pi_lib"}
+handler = {path = "../pi_lib/handler"}
+gray = {path = "../pi_lib/gray"}
+atom = {path = "../pi_lib/atom"}
 serde_json = "1.0.22"
 rand = "0.5.3"

@@ -4,8 +4,8 @@ use std::io::Result;
 
 use fnv::FnvHashMap;
 
-use pi_lib::handler::Handler;
-use pi_lib::atom::Atom;
+use handler::Handler;
+use atom::Atom;
 use net::Socket;
 
 pub trait P2PClientTraits {
