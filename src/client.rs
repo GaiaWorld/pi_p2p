@@ -9,7 +9,8 @@ use traits::P2PClientTraits;
 
 use fnv::FnvHashMap;
 
-use net::{Config, NetManager, Protocol, Socket, Stream};
+use net::{Config, NetManager, Protocol, RawStream, RawSocket};
+use net::api::{Socket, Stream};
 use rpc::client::RPCClient;
 use rpc::traits::RPCClientTraits;
 
@@ -31,7 +32,10 @@ fn handle_close(p2p: Arc<P2PClient>, stream_id: usize, reason: Result<()>) {
 
     let peers = &mut p2p.peers.write().unwrap();
     for (socket_addr, socket) in peers.iter() {
-        if stream_id == socket.socket {
+        if stream_id == match socket {
+            &Socket::Raw(ref s) => s.socket,
+            &Socket::Tls(ref s) => s.socket,
+        } {
             remove.push(socket_addr.clone());
         }
     }
@@ -46,7 +50,7 @@ fn handle_close(p2p: Arc<P2PClient>, stream_id: usize, reason: Result<()>) {
 }
 
 fn handle_connect(
-    peer: Result<(Socket, Arc<RwLock<Stream>>)>,
+    peer: Result<(RawSocket, Arc<RwLock<RawStream>>)>,
     addr: SocketAddr,
     p2p: Arc<P2PClient>,
 ) {
@@ -68,7 +72,7 @@ fn handle_connect(
         stream.set_recv_timeout(500 * 1000);
     }
     let rpc = p2p.rpc.clone();
-    rpc.set_stream(socket.clone(), stream);
+    rpc.set_stream(Socket::Raw(socket.clone()), Stream::Raw(stream));
 
     // //遗言
     // let last_will = LastWill {
@@ -91,11 +95,11 @@ fn handle_connect(
 }
 
 //连接成功后获取peer_list
-fn connect_ok(p2p: Arc<P2PClient>, addr: SocketAddr, socket: Socket) {
+fn connect_ok(p2p: Arc<P2PClient>, addr: SocketAddr, socket: RawSocket) {
     sleep(Duration::from_secs(2));
     println!("client func connect_ok!!!!!!!!!");
     //添加连接地址到out地址池中
-    p2p.peers.write().unwrap().insert(addr, socket);
+    p2p.peers.write().unwrap().insert(addr, Socket::Raw(socket.clone()));
     let p2p_ = p2p.clone();
     let p2p2 = p2p.clone();
     let peer_len;

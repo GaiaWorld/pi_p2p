@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use fnv::FnvHashMap;
-use net::Socket;
+use net::api::Socket;
 
 use client::P2PClient;
 use server::P2PServer;
@@ -27,7 +27,7 @@ pub struct P2PManage {
 
 impl P2PManage {
     //saddr: 0.0.0.0:3333
-    pub fn new(saddr: SocketAddr, mut map: FnvHashMap<SocketAddr, u64>) -> Self {
+    pub fn new(saddr: SocketAddr, mut map: FnvHashMap<SocketAddr, u64>, cert: Option<&str>, key: Option<&str>) -> Self {
         //把自己加入peer_list中
         map.insert(
             saddr.clone(),
@@ -40,7 +40,7 @@ impl P2PManage {
         let in_peers = Arc::new(RwLock::new(FnvHashMap::default()));
 
         //启动服务
-        let server = P2PServer::new(saddr.clone(), peer_list.clone(), in_peers.clone());
+        let server = P2PServer::new(saddr.clone(), peer_list.clone(), in_peers.clone(), cert, key);
         // //启动客户端
         // let client = P2PClient::new(caddr, peer_list.clone());
         P2PManage {

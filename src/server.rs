@@ -6,9 +6,11 @@ use mqtt3::{self};
 use rand::prelude::*;
 use fnv::FnvHashMap;
 
+use net::tls;
 use handle_server::GetAddr;
 use traits::P2PServerTraits;
-use net::{Config, NetManager, Protocol, Socket, Stream};
+use net::api::{Socket, Stream, TlsManager};
+use net::{Config, NetManager, Protocol, RawSocket, RawStream};
 use rpc::server::RPCServer;
 use rpc::traits::RPCServerTraits;
 use mqtt::server::ServerNode;
@@ -36,8 +38,8 @@ fn handle_close(p2p: Arc<P2PServer>, stream_id: usize, reason: Result<()>) {
     );
 }
 
-fn handle_bind(
-    peer: Result<(Socket, Arc<RwLock<Stream>>)>,
+fn handle_bind_raw(
+    peer: Result<(RawSocket, Arc<RwLock<RawStream>>)>,
     addr: Result<SocketAddr>,
     p2p: Arc<P2PServer>,
 ) {
@@ -52,24 +54,93 @@ fn handle_bind(
     );
 
     //写入连接列表
+    let socket_ = Socket::Raw(socket.clone());
     {
         let peers_map = &mut p2p.in_peers.write().unwrap();
-        peers_map.insert(socket.socket, (addr.clone(), socket.clone()));
+        peers_map.insert(socket.socket, (addr.clone(), socket_.clone()));
     }
     let rpc = &mut p2p.rpc.write().unwrap();
+
+    stream.write().unwrap().set_send_buf_size(1024 * 1024);
+    stream.write().unwrap().set_recv_timeout(500 * 1000);
+
+    //调用mqtt注册遗言
+    let stream_ = Stream::Raw(stream);
+    rpc.set_close_callback(
+        stream_.clone(),
+        Box::new(move |id, reason| handle_close(p2p_.clone(), id, reason)),
+    );
+
+    rpc.add_stream(socket_, stream_);
+    // rpc.set_attr(Box::new(
+    //     move |attr: &mut FnvHashMap<Atom, Arc<Any>>, _socket: Socket, connect: mqtt3::Connect| {
+    //         if let Some(username) = connect.username {
+    //             attr.insert(Atom::from("$username"), Arc::new(Vec::from(username)));
+    //         }
+    //         if let Some(password) = connect.password {
+    //             attr.insert(Atom::from("$password"), Arc::new(Vec::from(password)));
+    //         }
+    //         attr.insert(
+    //             Atom::from("$client_id"),
+    //             Arc::new(Vec::from(connect.client_id)),
+    //         );
+    //         attr.insert(
+    //             Atom::from("$connect_time"),
+    //             Arc::new(Vec::from(
+    //                 SystemTime::now()
+    //                     .duration_since(SystemTime::UNIX_EPOCH)
+    //                     .unwrap()
+    //                     .as_secs()
+    //                     .to_string(),
+    //             )),
+    //         );
+
+    //         println!("pi_p2p server attr insert peer_list");
+    //         attr.insert(Atom::from("peer_list"), peer_list.clone() as Arc<Any>);
+    //     },
+    // )).is_ok();
+    // let topic_handle = Handle::new();
+    // //通过rpc注册topic
+    // rpc.register(Atom::from(String::from("a/b/c").as_str()), true, Arc::new(topic_handle)).is_ok();
+    // let topic_handle = Handle::new();
+    // //注册遗言
+    // rpc.register(Atom::from(String::from("$last_will").as_str()), true, Arc::new(topic_handle)).is_ok();
+}
+
+fn handle_bind_tls(
+    peer: Result<(net::tls::TlsSocket, Arc<RwLock<net::tls::TlsStream>>)>,
+    addr: Result<SocketAddr>,
+    p2p: Arc<P2PServer>,
+) {
+    let peer_list = p2p.peer_list.clone();
+    let (socket, stream) = peer.unwrap();
+    let addr = addr.unwrap();
+    let p2p_ = p2p.clone();
+    println!(
+        "server handle_bind: addr = {:?}, socket:{}",
+        addr.clone(),
+        socket.socket
+    );
+
+    //写入连接列表
+    let socket_ = Socket::Tls(socket.clone());
     {
-        let s = &mut stream.write().unwrap();
-
-        //调用mqtt注册遗言
-        rpc.set_close_callback(
-            s,
-            Box::new(move |id, reason| handle_close(p2p_.clone(), id, reason)),
-        );
-        s.set_send_buf_size(1024 * 1024);
-        s.set_recv_timeout(500 * 1000);
+        let peers_map = &mut p2p.in_peers.write().unwrap();
+        peers_map.insert(socket.socket, (addr.clone(), socket_.clone()));
     }
+    let rpc = &mut p2p.rpc.write().unwrap();
 
-    rpc.add_stream(socket, stream);
+    stream.write().unwrap().set_send_buf_size(1024 * 1024);
+    stream.write().unwrap().set_recv_timeout(500 * 1000);
+
+    //调用mqtt注册遗言
+    let stream_ = Stream::Tls(stream);
+    rpc.set_close_callback(
+        stream_.clone(),
+        Box::new(move |id, reason| handle_close(p2p_.clone(), id, reason)),
+    );
+
+    rpc.add_stream(socket_, stream_);
     // rpc.set_attr(Box::new(
     //     move |attr: &mut FnvHashMap<Atom, Arc<Any>>, _socket: Socket, connect: mqtt3::Connect| {
     //         if let Some(username) = connect.username {
@@ -106,12 +177,7 @@ fn handle_bind(
 }
 
 impl P2PServer {
-    pub fn new(addr: SocketAddr, peer_list: Arc<RwLock<FnvHashMap<SocketAddr, u64>>>, in_peers: Arc<RwLock<FnvHashMap<usize, (SocketAddr, Socket)>>>) -> Arc<Self> {
-        let mgr = NetManager::new();
-        let config = Config {
-            protocol: Protocol::TCP,
-            addr: addr,
-        };
+    pub fn new(addr: SocketAddr, peer_list: Arc<RwLock<FnvHashMap<SocketAddr, u64>>>, in_peers: Arc<RwLock<FnvHashMap<usize, (SocketAddr, Socket)>>>, cert: Option<&str>, key: Option<&str>) -> Arc<Self> {
         let mqtt = ServerNode::new();
         let rpc = RPCServer::new(mqtt);
         let p2p = Arc::new(P2PServer {
@@ -120,10 +186,25 @@ impl P2PServer {
             peer_list: peer_list.clone(),
         });
         let p2p_ = p2p.clone();
-        mgr.bind(
-            config,
-            Box::new(move |peer, addr| handle_bind(peer, addr, p2p_.clone())),
-        );
+        match (cert, key) {
+            (Some(c), Some(k)) => {
+                let config = net::tls::TlsConfig::new(Protocol::TCP, addr, c, k);
+                TlsManager::new(net::tls::MAX_TLS_RECV_SIZE).bind(
+                    config,
+                    Box::new(move |peer, addr| handle_bind_tls(peer, addr, p2p_.clone())),
+                );
+            },
+            _ => {
+                let config = Config {
+                    protocol: Protocol::TCP,
+                    addr: addr,
+                };
+                NetManager::new().bind(
+                    config,
+                    Box::new(move |peer, addr| handle_bind_raw(peer, addr, p2p_.clone())),
+                );
+            }
+        }
 
         //注册topic
         p2p.register(

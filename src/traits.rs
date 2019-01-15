@@ -6,7 +6,7 @@ use fnv::FnvHashMap;
 
 use handler::Handler;
 use atom::Atom;
-use net::Socket;
+use net::api::Socket;
 
 pub trait P2PClientTraits {
     // 最终变为：$r，payload: params
