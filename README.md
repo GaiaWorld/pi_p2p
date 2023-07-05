@@ -1,3 +1,3 @@
 # pi_p2p
 
-## Deprecated【已废弃】
+## 基于Gossip和Quic的p2p库

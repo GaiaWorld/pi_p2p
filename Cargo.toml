@@ -1,16 +1,39 @@
 [package]
 name = "pi_p2p"
-version = "0.1.0"
-authors = ["luob <luob@yineng.com>"]
+version = "0.2.0"
+authors = ["vmos <vmosone007@gmail.com>"]
+edition = "2018"
+description = "The p2p library with Gossip and Quic"
+repository = "https://github.com/pi-revolution/pi-quic"
+license = "MIT OR Apache-2.0"
+keywords = ["pi", "p2p"]
 
 [dependencies]
-fnv = "1.0.6"
-mqtt = {path = "../pi_net/mqtt"}
-mqtt3 = { git = "https://github.com/tekjar/mqtt3" }
-rpc = {path = "../pi_net/rpc"}
-net = {path = "../pi_net/net"}
-handler = {path = "../pi_lib/handler"}
-gray = {path = "../pi_lib/gray"}
-atom = {path = "../pi_lib/atom"}
-serde_json = "1.0.22"
-rand = "0.5.3"
+futures = "0.3"
+rustls = { version = "0.20", features = ["dangerous_configuration"] }
+rustls-pemfile = "1.0"
+der-parser = "8.2"
+curve25519-parser = "0.3"
+ed25519-dalek = "1.0"
+x509-parser = { version = "0.15", features = ["verify"] }
+log = "0.4"
+pi_async = "0.5.13"
+pi_gossip = { path = "../pi_gossip" }
+udp = { path = "../pi_net/blocking_udp", package = "blocking_udp" }
+quic = { path = "../pi_net/quic" }
+pi_atom = "0.2"
+quinn-proto = "0.8"
+ciborium = "0.2"
+parking_lot = "0.12"
+crossbeam = "0.8"
+dashmap = "5.4"
+crossbeam-channel = "0.5"
+async-channel = "1.8"
+async-lock = "2.7"
+rand = { version = "0.8", features = ["small_rng"] }
+bytes = "1.4"
+hex = "0.4"
+pi_hash = "0.1"
+
+[dev-dependencies]
+env_logger = "0.9"
