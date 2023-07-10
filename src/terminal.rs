@@ -52,7 +52,7 @@ use quic::{AsyncService, SocketHandle, SocketEvent,
            utils::{QuicSocketReady, load_key_file}};
 
 use crate::{crypto::{ClientCertVerifier, ServerCertVerifier, host_id_to_host_dns},
-            connection::{Connection, PeerSocketHandle},
+            connection::{Connection, PeerSocketHandle, Channel},
             frame::{P2PFrame, P2PHeartBeatInfo},
             service::{DEFAULT_HEARTBEAT_TAG, P2PService, P2PServiceAdapter, P2PTransporter}};
 use crate::connection::ChannelId;
@@ -632,7 +632,8 @@ impl TerminalBuilder {
                                          1)?;
 
         //创建服务端Udp终端
-        let _ = UdpTerminal::bind(self.server_local_udp_address.unwrap(),
+        let local_address = self.server_local_udp_address.unwrap();
+        let _ = UdpTerminal::bind(local_address.clone(),
                                   self.server_udp_runtime.unwrap(),
                                   self.server_udp_recv_buf_size.unwrap(),
                                   self.server_udp_sent_buf_size.unwrap(),
@@ -768,6 +769,8 @@ impl TerminalBuilder {
             seed_connections: DashMap::new(),
             connections: DashMap::new(),
             peer_binds: DashMap::new(),
+            channels: DashMap::new(),
+            channels_len_map: DashMap::new(),
             behavior,
             transporter,
             failure_detector,
@@ -785,11 +788,20 @@ impl TerminalBuilder {
         };
         let terminal = Terminal(Arc::new(inner));
 
+        //设置本地主机的基础属性
         if self.is_seed {
             //声明本地主机为种子主机
             terminal.set_local_host_attr(Key::from(DEFAULT_SEED_HOST_KEY_STR),
                                          Value::Bool(true));
+        } else {
+            //声明本地主机为非种子主机
+            terminal.set_local_host_attr(Key::from(DEFAULT_SEED_HOST_KEY_STR),
+                                         Value::Bool(false));
         }
+        terminal.set_local_host_attr(Key::from(DEFAULT_HOST_IP_KEY_STR),
+                                     Value::Text(local_address.ip().to_string()));
+        terminal.set_local_host_attr(Key::from(DEFAULT_HOST_PORT_KEY_STR),
+                                     Value::from(local_address.port()));
 
         //通知P2P服务本地终端已初始化
         service
@@ -1032,16 +1044,6 @@ impl Terminal {
         }
     }
 
-    /// 获取指定对端连接绑定的对端主机唯一id
-    pub fn get_peer_id(&self, connect_uid: &usize) -> Option<GossipNodeID> {
-        if let Some(item) = self.0.peer_binds.get(connect_uid) {
-            let host_id = item.value();
-            Some(host_id.clone())
-        } else {
-            None
-        }
-    }
-
     /// 判断是否已握手
     pub fn is_handshaked(&self, connection_id: &usize) -> bool {
         self
@@ -1074,6 +1076,70 @@ impl Terminal {
             Some(host_id)
         } else {
             None
+        }
+    }
+
+    /// 获取指定连接的扩展通道数量
+    pub fn channels_len(&self, connection_id: &usize) -> usize {
+        if let Some(item) = self
+            .0
+            .channels_len_map
+            .get(connection_id) {
+            *item.value()
+        } else {
+            0
+        }
+    }
+
+    /// 判断指定连接的指定扩展通道是否存在
+    pub fn contains_channel(&self,
+                            connection_id: usize,
+                            channel_id: ChannelId) -> bool {
+        self
+            .0
+            .channels
+            .contains_key(&(connection_id, channel_id))
+    }
+
+    /// 加入指定连接的指定扩展通道
+    pub fn insert_channel(&self,
+                          connection_id: usize,
+                          channel_id: ChannelId) {
+        self
+            .0
+            .channels
+            .insert((connection_id, channel_id),
+                    Channel::new());
+
+        if self.0.channels_len_map.contains_key(&connection_id) {
+            if let Some(mut item) = self.0.channels_len_map.get_mut(&connection_id) {
+                //指定连接的通道数存在，则增加数量
+                let value = item.value_mut();
+                *value += 1;
+            }
+        } else {
+            self.0.channels_len_map.insert(connection_id, 1);
+        }
+    }
+
+    /// 移除指定连接的指定扩展通道
+    pub fn remove_channel(&self,
+                          connection_id: usize,
+                          channel_id: ChannelId) {
+        let mut is_full_remove = false;
+        if let Some(_) = self.0.channels.remove(&(connection_id, channel_id)) {
+            if let Some(mut item) = self.0.channels_len_map.get_mut(&connection_id) {
+                let value = item.value_mut();
+                *value -= 1;
+                if value == &0 {
+                    is_full_remove = true;
+                }
+            }
+        }
+
+        if is_full_remove {
+            //指定连接的所有通道已移除，则从连接通道表中移除指定连接
+            let _ = self.0.channels_len_map.remove(&connection_id);
         }
     }
 
@@ -1358,6 +1424,21 @@ impl Terminal {
             .rt
             .spawn(self.0.rt.alloc(),
                    task);
+    }
+
+    /// 派发一个在指定时间后执行的异步任务到当前P2P终端
+    pub fn spawn_timeout(&self,
+                         task: impl Future<Output = ()> + Send + 'static,
+                         timeout: usize) {
+        let rt = self.0.rt.clone();
+        let _ = self
+            .0
+            .rt
+            .spawn(self.0.rt.alloc(),
+                   async move {
+                       rt.timeout(timeout).await;
+                       task.await;
+                   });
     }
 }
 
@@ -1892,24 +1973,26 @@ fn collect<R>(rt: R,
 
 // 内部P2P终端
 pub(crate) struct InnerTerminal {
-    rt:                 MultiTaskRuntime,                   //多线程运行时
-    local:              GossipNodeID,                       //本地主机唯一id
-    client:             QuicClient,                         //Quic客户端
-    seed_connections:   DashMap<String, Connection>,        //种子主机临时连接表
-    connections:        DashMap<GossipNodeID, Connection>,  //连接表，关键字为本地主机唯一id，值为本地主机的连接
-    peer_binds:         DashMap<usize, GossipNodeID>,       //对端连接绑定表，关键字为对端连接的唯一id，值为对端主机的唯一id
-    behavior:           Scuttlebutt<P2PTransporter>,        //P2P服务行为
-    transporter:        P2PTransporter,                     //P2P传输器
-    failure_detector:   Arc<Mutex<PhiFailureDetector>>,     //P2P对端故障侦听器
-    uptime:             Duration,                           //P2P终端启动时间
-    rng:                Mutex<SmallRng>,                    //P2P终端本地随机数生成器
-    frames_recv:        Receiver<P2PFrame>,                 //等待处理的P2P消息帧接收器
-    frames_sent:        Sender<P2PFrame>,                   //等待处理的P2P消息帧发送器
-    seed_hosts:         RwLock<BTreeMap<Atom, SocketAddr>>, //种子主机表
-    heartbeat_blocking: DashMap<GossipNodeID, Duration>,    //发送心跳的阻塞表
-    blocking_timeout:   Duration,                           //阻塞发送心中的时间
-    heartbeat_interval: Arc<AtomicUsize>,                   //发送心跳间隔时长
-    collect_interval:   Arc<AtomicUsize>,                   //整理间隔时长
-    heartbeating_pause: Arc<AtomicBool>,                    //发送心跳暂停
-    collecting_pause:   Arc<AtomicBool>,                    //整理暂停
+    rt:                 MultiTaskRuntime,                       //多线程运行时
+    local:              GossipNodeID,                           //本地主机唯一id
+    client:             QuicClient,                             //Quic客户端
+    seed_connections:   DashMap<String, Connection>,            //种子主机临时连接表
+    connections:        DashMap<GossipNodeID, Connection>,      //连接表，关键字为本地主机唯一id，值为本地主机的连接
+    peer_binds:         DashMap<usize, GossipNodeID>,           //对端连接绑定表，关键字为对端连接的唯一id，值为对端主机的唯一id
+    channels:           DashMap<(usize, ChannelId), Channel>,   //连接的通道表
+    channels_len_map:   DashMap<usize, usize>,                  //连接通道数量表
+    behavior:           Scuttlebutt<P2PTransporter>,            //P2P服务行为
+    transporter:        P2PTransporter,                         //P2P传输器
+    failure_detector:   Arc<Mutex<PhiFailureDetector>>,         //P2P对端故障侦听器
+    uptime:             Duration,                               //P2P终端启动时间
+    rng:                Mutex<SmallRng>,                        //P2P终端本地随机数生成器
+    frames_recv:        Receiver<P2PFrame>,                     //等待处理的P2P消息帧接收器
+    frames_sent:        Sender<P2PFrame>,                       //等待处理的P2P消息帧发送器
+    seed_hosts:         RwLock<BTreeMap<Atom, SocketAddr>>,     //种子主机表
+    heartbeat_blocking: DashMap<GossipNodeID, Duration>,        //发送心跳的阻塞表
+    blocking_timeout:   Duration,                               //阻塞发送心中的时间
+    heartbeat_interval: Arc<AtomicUsize>,                       //发送心跳间隔时长
+    collect_interval:   Arc<AtomicUsize>,                       //整理间隔时长
+    heartbeating_pause: Arc<AtomicBool>,                        //发送心跳暂停
+    collecting_pause:   Arc<AtomicBool>,                        //整理暂停
 }

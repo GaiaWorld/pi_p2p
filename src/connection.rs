@@ -32,10 +32,11 @@ impl Clone for Connection {
 impl Debug for Connection {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f,
-               "Connection[uid = {:?}, local = {:?}, peer = {:?}, channels = {:?}, closed: {:?}]",
+               "Connection[uid = {:?}, local = {:?}, peer = {:?}, client: {:?}, channels = {:?}, closed: {:?}]",
                self.get_uid(),
                self.get_local(),
                self.get_peer(),
+               self.is_client(),
                self.channels_len(),
                self.is_closed())
     }
@@ -58,7 +59,6 @@ impl Connection {
         let inner = InnerConnection {
             rt,
             socket,
-            channels: DashMap::new(),
             terminal,
         };
 
@@ -92,8 +92,8 @@ impl Connection {
     pub fn channels_len(&self) -> usize {
         self
             .0
-            .channels
-            .len()
+            .terminal
+            .channels_len(&self.get_uid())
     }
 
     /// 检查指定唯一id的通道是否打开
@@ -106,8 +106,9 @@ impl Connection {
 
         self
             .0
-            .channels
-            .contains_key(channel_id)
+            .terminal
+            .contains_channel(self.get_uid(),
+                              channel_id.clone())
     }
 
     /// 获取连接的主通道
@@ -247,13 +248,16 @@ impl Connection {
             return Ok(());
         }
 
-        let _ = self.0.channels.remove(&channel_id);
         self
             .get_handle()
             .close_expanding_stream(StreamId(channel_id.into()))?;
 
         //注销关闭的指定通道
-        let _ = self.0.channels.remove(&channel_id);
+        self
+            .0
+            .terminal
+            .remove_channel(self.get_uid(),
+                            channel_id);
 
         Ok(())
     }
@@ -303,8 +307,9 @@ impl Connection {
         let channel_id = value.await?;
         self
             .0
-            .channels
-            .insert(channel_id, Channel::new());
+            .terminal
+            .insert_channel(self.get_uid(),
+                            channel_id);
 
         Ok(channel_id)
     }
@@ -377,7 +382,6 @@ impl Connection {
 struct InnerConnection {
     rt:         Option<LocalTaskRuntime<()>>,   //P2P连接所在运行时
     socket:     PeerSocketHandle,               //quic对等连接句柄
-    channels:   DashMap<ChannelId, Channel>,    //连接的通道表
     terminal:   Terminal,                       //P2P终端
 }
 
@@ -420,7 +424,7 @@ impl ChannelId {
 }
 
 // P2P连接通道
-struct Channel {
+pub(crate) struct Channel {
 
 }
 

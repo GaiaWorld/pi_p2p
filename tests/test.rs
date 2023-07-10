@@ -24,6 +24,7 @@ use pi_p2p::{connection::{ChannelId, Connection},
              service::{P2PService, P2PServiceAdapter, P2PServiceListener, send_to_service},
              terminal::{DEFAULT_HOST_IP_KEY_STR, DEFAULT_HOST_PORT_KEY_STR, TerminalBuilder, Terminal},
              port::PortService};
+use pi_p2p::port::{PortEvent, PortMode};
 
 #[test]
 fn test_frame() {
@@ -187,7 +188,7 @@ impl P2PService for TestP2PService {
     }
 
     fn received(&self,
-                peer: Option<GossipNodeID>,
+                from: Option<GossipNodeID>,
                 connection: Connection,
                 channel_id: ChannelId,
                 info: P2PServiceReadInfo) -> LocalBoxFuture<'static, ()> {
@@ -1165,6 +1166,7 @@ impl P2PService for TestByP2PService {
             if let Ok(channel_id) = terminal.open_channel(&peer).await {
                 let info = P2PServiceWriteInfo {
                     port: 80,
+                    index: 1,
                     payload: BytesMut::new(),
                 };
                 if let Err(e) = send_to_service(&connection, &channel_id, info) {
@@ -1182,13 +1184,13 @@ impl P2PService for TestByP2PService {
     }
 
     fn received(&self,
-                peer: Option<GossipNodeID>,
+                from: Option<GossipNodeID>,
                 connection: Connection,
                 channel_id: ChannelId,
                 info: P2PServiceReadInfo) -> LocalBoxFuture<'static, ()> {
         async move {
-            println!("!!!!!!received, peer: {:?}, channel_id: {:?}, port: {:?}",
-                     peer,
+            println!("!!!!!!received, from: {:?}, channel_id: {:?}, port: {:?}",
+                     from,
                      channel_id,
                      info.port);
         }.boxed_local()
@@ -1619,7 +1621,7 @@ fn test_open_port() {
                 }
             }
 
-            match service_a.open_port(8080, Some("test port")) {
+            match service_a.open_port(8080, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service a port failed, reason: {:?}", e);
                 },
@@ -1647,7 +1649,7 @@ fn test_open_port() {
                 }
             }
 
-            match service_b.open_port(8081, Some("test port")) {
+            match service_b.open_port(8081, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service b port failed, reason: {:?}", e);
                 },
@@ -1815,7 +1817,7 @@ fn test_access_port_between_host() {
 
         let rt_clone = rt_copy.clone();
         rt_copy.spawn(rt_copy.alloc(), async move {
-            match service_a.open_port(8080, Some("test port")) {
+            match service_a.open_port(8080, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service a port failed, reason: {:?}", e);
                 },
@@ -1841,17 +1843,18 @@ fn test_access_port_between_host() {
                                      e);
                         },
                         Ok(peer_port) => {
-                            self_port.send_to("Hello a from a".as_bytes());
-                            peer_port.send_to("Hello b from a".as_bytes());
+                            self_port.send(0, "Hello a from a".as_bytes());
+                            peer_port.send(0, "Hello b from a".as_bytes());
 
-                            while let Ok((from, bytes)) = pipeline.poll().await {
-                                println!("!!!!!!from: {:?}, msg: {:?}",
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                println!("!!!!!!from: {:?}, index: {:?}, msg: {:?}",
                                          from,
+                                         index,
                                          String::from_utf8_lossy(bytes.as_ref()));
 
-                                if let Some(peer) = from {
+                                if let Some((peer, _reply)) = from {
                                     if peer_port.peer().unwrap() == peer {
-                                        peer_port.send_to("Hello b from a".as_bytes());
+                                        peer_port.send(0, "Hello b from a".as_bytes());
                                     }
                                 }
                             }
@@ -1863,7 +1866,7 @@ fn test_access_port_between_host() {
 
         let rt_clone = rt_copy.clone();
         rt_copy.spawn(rt_copy.alloc(), async move {
-            match service_b.open_port(8081, Some("test port")) {
+            match service_b.open_port(8081, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service b port failed, reason: {:?}", e);
                 },
@@ -1889,17 +1892,18 @@ fn test_access_port_between_host() {
                                      e);
                         },
                         Ok(peer_port) => {
-                            self_port.send_to("Hello b from b".as_bytes());
-                            peer_port.send_to("Hello a from b".as_bytes());
+                            self_port.send(0, "Hello b from b".as_bytes());
+                            peer_port.send(0, "Hello a from b".as_bytes());
 
-                            while let Ok((from, bytes)) = pipeline.poll().await {
-                                println!("!!!!!!from: {:?}, msg: {:?}",
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                println!("!!!!!!from: {:?}, index: {:?}, msg: {:?}",
                                          from,
+                                         index,
                                          String::from_utf8_lossy(bytes.as_ref()));
 
-                                if let Some(peer) = from {
+                                if let Some((peer, _reply)) = from {
                                     if peer_port.peer().unwrap() == peer {
-                                        peer_port.send_to("Hello a from b".as_bytes());
+                                        peer_port.send(0, "Hello a from b".as_bytes());
                                     }
                                 }
                             }
@@ -2059,7 +2063,7 @@ fn test_close_port() {
         }
 
         rt_copy.spawn(rt_copy.alloc(), async move {
-            match service_a.open_port(8080, Some("test port")) {
+            match service_a.open_port(8080, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service a port failed, reason: {:?}", e);
                 },
@@ -2080,18 +2084,19 @@ fn test_close_port() {
                                      e);
                         },
                         Ok(peer_port) => {
-                            self_port.send_to("Hello a from a".as_bytes());
-                            peer_port.send_to("Hello b from a".as_bytes());
+                            self_port.send(0, "Hello a from a".as_bytes());
+                            peer_port.send(0, "Hello b from a".as_bytes());
 
                             let mut count = 0;
-                            while let Ok((from, bytes)) = pipeline.poll().await {
-                                println!("!!!!!!from: {:?}, msg: {:?}",
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                println!("!!!!!!from: {:?}, index: {:?}, msg: {:?}",
                                          from,
+                                         index,
                                          String::from_utf8_lossy(bytes.as_ref()));
 
-                                if let Some(peer) = from {
+                                if let Some((peer, _reply)) = from {
                                     if peer_port.peer().unwrap() == peer {
-                                        peer_port.send_to("Hello b from a".as_bytes());
+                                        peer_port.send(0, "Hello b from a".as_bytes());
                                     }
                                 }
 
@@ -2117,7 +2122,7 @@ fn test_close_port() {
         });
 
         rt_copy.spawn(rt_copy.alloc(), async move {
-            match service_b.open_port(8081, Some("test port")) {
+            match service_b.open_port(8081, Some("test port"), PortMode::Send) {
                 Err(e) => {
                     println!("!!!!!!open service b port failed, reason: {:?}", e);
                 },
@@ -2138,18 +2143,19 @@ fn test_close_port() {
                                      e);
                         },
                         Ok(peer_port) => {
-                            self_port.send_to("Hello b from b".as_bytes());
-                            peer_port.send_to("Hello a from b".as_bytes());
+                            self_port.send(0, "Hello b from b".as_bytes());
+                            peer_port.send(0, "Hello a from b".as_bytes());
 
                             let mut count = 0;
-                            while let Ok((from, bytes)) = pipeline.poll().await {
-                                println!("!!!!!!from: {:?}, msg: {:?}",
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                println!("!!!!!!from: {:?}, index: {:?}, msg: {:?}",
                                          from,
+                                         index,
                                          String::from_utf8_lossy(bytes.as_ref()));
 
-                                if let Some(peer) = from {
+                                if let Some((peer, _reply)) = from {
                                     if peer_port.peer().unwrap() == peer {
-                                        peer_port.send_to("Hello a from b".as_bytes());
+                                        peer_port.send(0, "Hello a from b".as_bytes());
                                     }
                                 }
 
@@ -2171,6 +2177,283 @@ fn test_close_port() {
 
             while let Some(event) = service_b.try_poll_event() {
                 println!("!!!!!!service b event: {:?}", event);
+            }
+        });
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+fn test_request_port() {
+    //启动日志系统
+    env_logger::builder().format_timestamp_millis().init();
+
+    let rt = MultiTaskRuntimeBuilder::default().build();
+
+    //A主机
+    let (send, recv_a) = bounded(1);
+    {
+        let server_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let server_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+        let client_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let client_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+
+        let rt_copy = rt.clone();
+        rt.spawn(rt.alloc(), async move {
+            let mut builder = TerminalBuilder::default();
+            builder = builder
+                .bind_runtime(rt_copy.clone(),
+                              server_udp_runtime,
+                              server_quic_runtimes,
+                              client_udp_runtime,
+                              client_quic_runtimes);
+            builder = builder
+                .bind_terminal_cert_and_key("./tests/ca/ca_cert.pem",
+                                            "./tests/A/a.crt",
+                                            "./tests/A/a.key");
+            builder = builder
+                .bind_server_local_udp_address(SocketAddr::new(IpAddr::from_str("192.168.35.65").unwrap(), 38080));
+            builder = builder
+                .set_client_verify_level_to_server::<&str>(None);
+            builder = builder.enable_server_verify_level_to_client();
+            builder = builder
+                .add_seed_host_address("7DctBSLsx6EHXhE7tFN3qMV1vvzuxHwTKhiZKz65hF4u",
+                                       IpAddr::from_str("192.168.35.65").unwrap(),
+                                       38081);
+            builder = builder.set_failure_detector_config(8.0,
+                                                          1000,
+                                                          Duration::from_millis(10000),
+                                                          Duration::from_millis(5000),
+                                                          Duration::from_millis(30000));
+
+            let port_service = PortService::new();
+            let service = Arc::new(port_service.clone());
+            let adapter = Arc::new(P2PServiceAdapter::with_service(service.clone(), Some(5000)));
+            builder = builder.set_service(adapter.clone());
+            builder = builder.set_version(0, 1, 0);
+            let terminal = builder.build().await.unwrap();
+            terminal.pause_heartbeating();
+            terminal.pause_collecting();
+            terminal.startup(rt_copy.clone(),
+                             1,
+                             1,
+                             5000,
+                             5000,
+                             Some(Duration::from_millis(5000)),
+                             Duration::from_millis(30000)).await;
+            send.send(port_service).await;
+        });
+    }
+
+    //B主机
+    let (send, recv_b) = bounded(1);
+    {
+        let server_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let server_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+        let client_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let client_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+
+        let rt_copy = rt.clone();
+        rt.spawn(rt.alloc(), async move {
+            let mut builder = TerminalBuilder::default();
+            builder = builder
+                .bind_runtime(rt_copy.clone(),
+                              server_udp_runtime,
+                              server_quic_runtimes,
+                              client_udp_runtime,
+                              client_quic_runtimes);
+            builder = builder
+                .bind_terminal_cert_and_key("./tests/ca/ca_cert.pem",
+                                            "./tests/B/b.crt",
+                                            "./tests/B/b.key");
+            builder = builder
+                .bind_server_local_udp_address(SocketAddr::new(IpAddr::from_str("192.168.35.65").unwrap(), 38081));
+            builder = builder
+                .set_client_verify_level_to_server::<&str>(None);
+            builder = builder.enable_server_verify_level_to_client();
+            builder = builder
+                .add_seed_host_address("VmvoecS91YdyzncoXp94iFgkmCu82SitFTfFYT4DeKR",
+                                       IpAddr::from_str("192.168.35.65").unwrap(),
+                                       38080);
+            builder = builder.set_failure_detector_config(8.0,
+                                                          1000,
+                                                          Duration::from_millis(10000),
+                                                          Duration::from_millis(5000),
+                                                          Duration::from_millis(30000));
+
+            let port_service = PortService::new();
+            let service = Arc::new(port_service.clone());
+            let adapter = Arc::new(P2PServiceAdapter::with_service(service.clone(), Some(5000)));
+            builder = builder.set_service(adapter.clone());
+            builder = builder.set_version(0, 1, 0);
+            let terminal = builder.build().await.unwrap();
+            terminal.pause_heartbeating();
+            terminal.pause_collecting();
+            terminal.startup(rt_copy.clone(),
+                             1,
+                             1,
+                             5000,
+                             5000,
+                             Some(Duration::from_millis(5000)),
+                             Duration::from_millis(30000)).await;
+            send.send(port_service).await;
+        });
+    }
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        let service_a = recv_a.recv().await.unwrap();
+        let host_a = service_a.local_host().unwrap();
+        println!("!!!!!!terminal a: {:?}", host_a);
+
+        let service_b = recv_b.recv().await.unwrap();
+        let host_b = service_b.local_host().unwrap();
+        println!("!!!!!!terminal b: {:?}", host_b);
+
+        //等待初始化后再打开端口
+        let mut count = 0;
+        while count < 2 {
+            if let Some(event) = service_a.try_poll_event() {
+                if event.is_inited() {
+                    println!("!!!!!!service a inited");
+                    count += 1;
+                }
+            }
+
+            if let Some(event) = service_b.try_poll_event() {
+                if event.is_inited() {
+                    println!("!!!!!!service b inited");
+                    count += 1;
+                }
+            }
+        }
+
+        let rt_clone = rt_copy.clone();
+        rt_copy.spawn(rt_copy.alloc(), async move {
+            match service_a.open_port(8080, Some("test port"), PortMode::Send) {
+                Err(e) => {
+                    println!("!!!!!!open service a port failed, reason: {:?}", e);
+                },
+                Ok((self_port, pipeline)) => {
+                    println!("!!!!!!open service a port ok\n\tpeer_port: {:#?}\n\tpipeline: {:#?}\n\tports: {:#?}",
+                             self_port,
+                             pipeline,
+                             service_a.local_ports());
+
+                    match service_a
+                        .connect_to(&host_b,
+                                    8081,
+                                    5000)
+                        .await {
+                        Err(e) => {
+                            println!("!!!!!!connect to peer service port failed, peer: {:?}, port: 8081, reason: {:?}",
+                                     host_b,
+                                     e);
+                        },
+                        Ok(peer_port) => {
+                            self_port.send(0, "Hello a from a".as_bytes());
+
+                            let service_a_copy = service_a.clone();
+                            let peer_port_copy = peer_port.clone();
+                            rt_clone.spawn(rt_clone.alloc(), async move {
+                                while let Ok(event) = service_a_copy.poll_event().await {
+                                    if let PortEvent::Handshaked(peer) = event {
+                                        println!("!!!!!!handshaked, peer: {:?}", peer);
+                                        if peer_port_copy.peer().unwrap() == peer {
+                                            //与端口所在的对端主机已握手
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                for index in 0..10 {
+                                    let r = peer_port_copy
+                                        .request(index,
+                                                 "Hello b from a".as_bytes(),
+                                                 5000).await;
+                                    println!("######response from b, index: {:?}, r: {:?}", index, r);
+                                }
+                            });
+
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                if let Some((peer, reply_peer)) = from {
+                                    if let Err(e) = reply_peer.reply("Hi b") {
+                                        println!("!!!!!!reply failed, peer: {:?}, index: {:?}, reason: {:?}", peer, index, e);
+                                    }
+                                } else {
+                                    println!("!!!!!!from: None, index: {:?}, msg: {:?}",
+                                             index,
+                                             String::from_utf8_lossy(bytes.as_ref()));
+                                }
+                            }
+                        },
+                    }
+                },
+            }
+        });
+
+        let rt_clone = rt_copy.clone();
+        rt_copy.spawn(rt_copy.alloc(), async move {
+            match service_b.open_port(8081, Some("test port"), PortMode::Send) {
+                Err(e) => {
+                    println!("!!!!!!open service b port failed, reason: {:?}", e);
+                },
+                Ok((self_port, pipeline)) => {
+                    println!("!!!!!!open service b port ok\n\tpeer_port: {:#?}\n\tpipeline: {:#?}\n\tports: {:#?}",
+                             self_port,
+                             pipeline,
+                             service_b.local_ports());
+
+                    match service_b
+                        .connect_to(&host_a,
+                                    8080,
+                                    5000)
+                        .await {
+                        Err(e) => {
+                            println!("!!!!!!connect to peer service port failed, peer: {:?}, port: 8080, reason: {:?}",
+                                     host_a,
+                                     e);
+                        },
+                        Ok(peer_port) => {
+                            self_port.send(0, "Hello b from b".as_bytes());
+
+                            let service_b_copy = service_b.clone();
+                            let peer_port_copy = peer_port.clone();
+                            rt_clone.spawn(rt_clone.alloc(), async move {
+                                while let Ok(event) = service_b_copy.poll_event().await {
+                                    if let PortEvent::Handshaked(peer) = event {
+                                        println!("!!!!!!handshaked, peer: {:?}", peer);
+                                        if peer_port_copy.peer().unwrap() == peer {
+                                            //与端口所在的对端主机已握手
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                for index in 0..10 {
+                                    let r = peer_port_copy
+                                        .request(index,
+                                                 "Hello a from b".as_bytes(),
+                                                 5000).await;
+                                    println!("######response from a, index: {:?}, r: {:?}", index, r);
+                                }
+                            });
+
+                            while let Ok((from, index, bytes)) = pipeline.poll().await {
+                                if let Some((peer, reply_peer)) = from {
+                                    if let Err(e) = reply_peer.reply("Hi a") {
+                                        println!("!!!!!!reply failed, peer: {:?}, index: {:?}, reason: {:?}", peer, index, e);
+                                    }
+                                } else {
+                                    println!("!!!!!!from: None, index: {:?}, msg: {:?}",
+                                             index,
+                                             String::from_utf8_lossy(bytes.as_ref()));
+                                }
+                            }
+                        },
+                    }
+                },
             }
         });
     });

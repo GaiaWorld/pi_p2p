@@ -173,7 +173,7 @@ pub trait P2PService: Send + Sync + 'static {
 
     /// 接收到对端发送的P2P服务消息
     fn received(&self,
-                peer: Option<GossipNodeID>,
+                from: Option<GossipNodeID>,
                 connection: Connection,
                 channel_id: ChannelId,
                 info: P2PServiceReadInfo) -> LocalBoxFuture<'static, ()>;
@@ -536,7 +536,7 @@ impl AsyncService for P2PServiceAdapter {
                 //当前连接已注销
                 connection
             } else {
-                //当产胆连接未注销，则立即退出
+                //当前连接未注销，则立即退出
                 return;
             };
 

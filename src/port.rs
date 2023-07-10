@@ -8,18 +8,22 @@ use std::io::{Error, Result, ErrorKind};
 use futures::future::{FutureExt, LocalBoxFuture};
 use crossbeam::sync::ShardedLock;
 use async_channel::{Sender as AsyncSender, Receiver as AsyncReceiver, unbounded as async_unbounded};
+use pi_async::rt::AsyncValueNonBlocking;
 use pi_gossip::{GossipNodeID,
                 scuttlebutt::table::{Key, NodeChangingEvent}};
+use pi_atom::Atom;
 use dashmap::DashMap;
 use bytes::{Bytes, BytesMut};
-use pi_atom::Atom;
 use ciborium::Value;
 use log::{info, error};
 
 use crate::{connection::{ChannelId, Connection},
-            frame::{P2PFrame, P2PHandShakeInfo, P2PServiceReadInfo, P2PServiceWriteInfo},
+            frame::{DEFAULT_SERVICE_SEND_INDEX, P2PFrame, P2PHandShakeInfo, P2PServiceReadInfo, P2PServiceWriteInfo},
             service::{DEFAULT_CONNECT_HANDSHAKE_TAG, P2PService, P2PServiceListener, send_to_service},
             terminal::Terminal};
+
+// 默认的回应消息端口号
+const DEFAULT_REPLY_PORT: u16 = 0;
 
 // 默认的最小服务端口号
 const DEFAULT_MIN_SERVICE_PORT: u16 = 1;
@@ -110,6 +114,7 @@ impl P2PService for PortService {
                   peer: GossipNodeID,
                   _connection: Connection) -> LocalBoxFuture<'static, ()> {
         let service = self.clone();
+
         async move {
             let _ = service
                 .0
@@ -120,22 +125,45 @@ impl P2PService for PortService {
     }
 
     fn received(&self,
-                peer: Option<GossipNodeID>,
-                _connection: Connection,
-                _channel_id: ChannelId,
+                from: Option<GossipNodeID>,
+                connection: Connection,
+                channel_id: ChannelId,
                 info: P2PServiceReadInfo) -> LocalBoxFuture<'static, ()> {
         let port = info.port;
+        let index = info.index;
         let payload = info.payload;
 
         let service = self.clone();
         async move {
-            if let Some(item) = service.0.services.get(&port) {
-                //指定端口号的端口服务存在
-                let value = item.value();
-                let _ = value
-                    .1
-                    .send((peer, payload))
-                    .await;
+            if port == DEFAULT_REPLY_PORT {
+                //接收到对端主机的请求回应消息
+                if let Some((_key, result)) = service
+                    .0
+                    .response_map
+                    .remove(&index) {
+                    //指定端口和序号的消息是对应服务请求的回应消息，则立即回应
+                    result.set(Ok(payload));
+                }
+            } else {
+                //接收到对端主机发给指定服务端口的服务消息
+                if let Some(item) = service.0.services.get(&port) {
+                    //指定端口号的端口服务存在
+                    if let Some(from) = from {
+                        //来自对端主机的服务消息
+                        let value = item.value();
+                        let _ = value
+                            .2
+                            .send((Some((from, ReplyPeer(connection, channel_id, index))), index, payload))
+                            .await;
+                    } else {
+                        //来自本地主机的服务消息
+                        let value = item.value();
+                        let _ = value
+                            .2
+                            .send((None, index, payload))
+                            .await;
+                    }
+                }
             }
         }.boxed_local()
     }
@@ -146,8 +174,9 @@ impl P2PService for PortService {
                       code: u32,
                       result: Result<()>) -> LocalBoxFuture<'static, ()> {
         if let Some(terminal) = self.get_terminal() {
-            if let Some(peer) = terminal.get_peer_id(&connection.get_uid()) {
+            if let Some(peer) = terminal.get_peer_host_id(&connection.get_uid()) {
                 let service = self.clone();
+
                 return async move {
                     let _ = service
                         .0
@@ -178,8 +207,9 @@ impl P2PService for PortService {
               code: u32,
               result: Result<()>) -> LocalBoxFuture<'static, ()> {
         if let Some(terminal) = self.get_terminal() {
-            if let Some(peer) = terminal.get_peer_id(&connection.get_uid()) {
+            if let Some(peer) = terminal.get_peer_host_id(&connection.get_uid()) {
                 let service = self.clone();
+
                 return async move {
                     let _ = service
                         .0
@@ -209,6 +239,7 @@ impl PortService {
         let ports = DashMap::new();
         let ports_map = DashMap::new();
         let (event_sent, event_recv) = async_unbounded();
+        let response_map = DashMap::new();
 
         let inner = InnerPortService {
             terminal: ShardedLock::new(None),
@@ -219,6 +250,7 @@ impl PortService {
             ports_map,
             event_recv,
             event_sent,
+            response_map,
         };
 
         PortService(Arc::new(inner))
@@ -250,16 +282,16 @@ impl PortService {
     }
 
     /// 获取当前本地端口服务中的所有端口
-    pub fn local_ports(&self) -> Vec<(u16, Option<String>)> {
+    pub fn local_ports(&self) -> Vec<(u16, Option<String>, PortMode)> {
         let mut ports = Vec::with_capacity(self.0.services.len());
 
         for item in self.0.services.iter() {
             let key = item.key();
             let value = item.value();
             if let Some(name) = &value.0 {
-                ports.push((*key, Some(name.as_str().to_string())));
+                ports.push((*key, Some(name.as_str().to_string()), value.1));
             } else {
-                ports.push((*key, None));
+                ports.push((*key, None, value.1));
             }
         }
 
@@ -267,7 +299,7 @@ impl PortService {
     }
 
     /// 获取指定对端主机的端口服务中的所有端口
-    pub fn peer_ports(&self, peer: &GossipNodeID<32>) -> Vec<(u16, Option<String>)> {
+    pub fn peer_ports(&self, peer: &GossipNodeID<32>) -> Vec<(u16, Option<String>, PortMode)> {
         if let Some(terminal) = self.get_terminal() {
             if let Some((value, _version)) = terminal
                 .get_host_attr(peer,
@@ -277,12 +309,14 @@ impl PortService {
                         .iter()
                         .map(|(key, val)| {
                             let port = u128::try_from(key.as_integer().unwrap()).unwrap() as u16;
-                            let name = if let Some(name) = val.as_text() {
+                            let array = val.as_array().unwrap();
+                            let name = if let Some(name) = array[0].as_text() {
                                 Some(name.to_string())
                             } else {
                                 None
                             };
-                            (port, name)
+                            let mode: PortMode = (u128::try_from(array[1].as_integer().unwrap()).unwrap() as u8).into();
+                            (port, name, mode)
                         })
                         .collect()
                 } else {
@@ -299,7 +333,8 @@ impl PortService {
     /// 在本地P2P主机上打开一个服务端口，可以设置服务名称，此服务端口将被延时广播到整个主机网络
     pub fn open_port(&self,
                      port: u16,
-                     name: Option<&str>) -> Result<(PeerPort, PortPipeLine)> {
+                     name: Option<&str>,
+                     mode: PortMode) -> Result<(PeerPort, PortPipeLine)> {
         if self.0.services.contains_key(&port) {
             //指定的端口服务已存在
             return Err(Error::new(ErrorKind::Other,
@@ -367,7 +402,7 @@ impl PortService {
                     self
                         .0
                         .services
-                        .insert(port, (Some(atom.clone()), port_sent));
+                        .insert(port, (Some(atom.clone()), mode, port_sent));
                     self.0.services_map.insert(atom, port);
 
                     name.to_string()
@@ -375,14 +410,14 @@ impl PortService {
                     self
                         .0
                         .services
-                        .insert(port, (None, port_sent));
+                        .insert(port, (None, mode, port_sent));
 
                     String::new()
                 };
 
                 //在本地主机上绑定新注册的服务端口
                 ports_map.insert(port,
-                                 Value::from(port_name));
+                                 Value::Array(vec![Value::from(port_name), Value::from(mode as u8)]));
                 let ports_vec = ports_map
                     .into_iter()
                     .map(|(key, val)| (Value::from(key), val))
@@ -426,6 +461,7 @@ impl PortService {
 */
 impl PortService {
     /// 异步连接到指定对端主机的指定服务端口号，成功返回对端主机的端口，失败则返回错误原因
+    /// 连接者必须首先发起通讯，否则对端将无法知道已经连接
     pub async fn connect_to(&self,
                             peer: &GossipNodeID<32>,
                             port: u16,
@@ -438,7 +474,7 @@ impl PortService {
                     let value = item.value();
                     return Ok(PeerPort::with_local(self.clone(),
                                                    port,
-                                                   value.1.clone()));
+                                                   value.2.clone()));
                 }
             }
         }
@@ -528,6 +564,9 @@ impl PortService {
                     .insert((peer.clone(), channel_id),
                             port);
 
+                //建立通道端，必须首先发起请求
+                peer_port.send(0, &[]);
+
                 Ok(peer_port)
             } else {
                 Err(Error::new(ErrorKind::Other,
@@ -555,24 +594,34 @@ impl PortService {
 
 // 内部端口服务
 struct InnerPortService {
-    terminal:           ShardedLock<Option<Terminal>>,                                                  //P2P终端
-    listener:           ShardedLock<Option<Arc<P2PServiceListener>>>,                                   //P2P服务端监听器
-    services:           DashMap<u16, (Option<Atom>, AsyncSender<(Option<GossipNodeID<32>>, Bytes)>)>,   //本地端口服务表
-    services_map:       DashMap<Atom, u16>,                                                             //本地端口服务名称映射表
-    ports:              DashMap<(GossipNodeID<32>, u16), PeerPort>,                                     //已连接到对端主机的端口表
-    ports_map:          DashMap<(GossipNodeID<32>, ChannelId), u16>,                                    //已连接到对端主机的通道映射表
-    event_recv:         AsyncReceiver<PortEvent>,                                                       //端口服务事件接收器
-    event_sent:         AsyncSender<PortEvent>,                                                         //端口服务事件发送器
+    //P2P终端
+    terminal:           ShardedLock<Option<Terminal>>,
+    //P2P服务端监听器
+    listener:           ShardedLock<Option<Arc<P2PServiceListener>>>,
+    //本地端口服务表
+    services:           DashMap<u16, (Option<Atom>, PortMode, AsyncSender<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)>)>,
+    //本地端口服务名称映射表
+    services_map:       DashMap<Atom, u16>,
+    //已连接到对端主机的端口表
+    ports:              DashMap<(GossipNodeID<32>, u16), PeerPort>,
+    //已连接到对端主机的通道映射表
+    ports_map:          DashMap<(GossipNodeID<32>, ChannelId), u16>,
+    //端口服务事件接收器
+    event_recv:         AsyncReceiver<PortEvent>,
+    //端口服务事件发送器
+    event_sent:         AsyncSender<PortEvent>,
+    //端口请求回应表
+    response_map:       DashMap<u32, AsyncValueNonBlocking<Result<Bytes>>>,
 }
 
 ///
 /// 端口服务管道，用于接收对端主机通过端口发送的P2P服务消息
 ///
 pub struct PortPipeLine {
-    service:    PortService,                                        //端口服务管道所属的端口服务
-    local:      GossipNodeID<32>,                                   //本地主机唯一id
-    port:       u16,                                                //端口号
-    receiver:   AsyncReceiver<(Option<GossipNodeID<32>>, Bytes)>,   //P2P服务消息接收器
+    service:    PortService,                                                        //端口服务管道所属的端口服务
+    local:      GossipNodeID<32>,                                                   //本地主机唯一id
+    port:       u16,                                                                //端口号
+    receiver:   AsyncReceiver<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)>, //P2P服务消息接收器
 }
 
 impl Debug for PortPipeLine {
@@ -587,7 +636,7 @@ impl Debug for PortPipeLine {
 
 impl Drop for PortPipeLine {
     fn drop(&mut self) {
-        if let Some((_key, (name, _sender))) = self.service.0.services.remove(&self.port) {
+        if let Some((_key, (name, mode, _sender))) = self.service.0.services.remove(&self.port) {
             //注销指定的端口服务
             let port_name = if let Some(name) = name {
                 self
@@ -635,9 +684,10 @@ impl Drop for PortPipeLine {
                                          Value::Map(ports_vec));
             }
 
-            info!("Unregister service port successed, local: {:?}, port: {:?}, name: {:?}",
+            info!("Unregister service port successed, local: {:?}, port: {:?}, name: {:?}, mode: {:?}",
                 self.local,
                 self.port,
+                mode,
                 port_name);
         }
     }
@@ -651,7 +701,7 @@ impl PortPipeLine {
     pub fn new(service: PortService,
                local: GossipNodeID<32>,
                port: u16,
-               receiver: AsyncReceiver<(Option<GossipNodeID<32>>, Bytes)>) -> Self {
+               receiver: AsyncReceiver<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)>) -> Self {
         PortPipeLine {
             service,
             local,
@@ -714,20 +764,33 @@ impl PortPipeLine {
 * 端口服务管道异步方法
 */
 impl PortPipeLine {
-    /// 异步轮询端口服务管道中的P2P服务消息，返回发送消息的对端主机唯一id和P2P服务消息负载
-    pub async fn poll(&self) -> Result<(Option<GossipNodeID<32>>, Bytes)> {
-        match self
-            .receiver
-            .recv()
-            .await {
-            Err(e) => {
-                Err(Error::new(ErrorKind::Other,
-                               format!("Poll port failed, self: {:?}, reason: {:?}",
-                                       self,
-                                       e)))
+    /// 异步轮询端口服务管道中的P2P服务消息，返回发送消息的对端主机唯一id，消息序号和P2P服务消息负载
+    pub async fn poll(&self) -> Result<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)> {
+        match self.receiver.try_recv() {
+            Ok(msg) => {
+                //当前有服务消息，则立即返回
+                Ok(msg)
             },
-            Ok((peer, bytes)) => {
-                Ok((peer, bytes))
+            Err(e) if e.is_closed() => {
+                //当前通道已关闭，则立即返回空
+                Ok((None, 0, Bytes::new()))
+            },
+            Err(_) => {
+                //当前没有任何服务消息，则异步等待
+                match self
+                    .receiver
+                    .recv()
+                    .await {
+                    Err(e) => {
+                        Err(Error::new(ErrorKind::Other,
+                                       format!("Poll port failed, self: {:?}, reason: {:?}",
+                                               self,
+                                               e)))
+                    },
+                    Ok((peer_info, index, bytes)) => {
+                        Ok((peer_info, index, bytes))
+                    },
+                }
             },
         }
     }
@@ -767,47 +830,6 @@ impl Debug for PeerPort {
     }
 }
 
-impl Drop for PeerPort {
-    fn drop(&mut self) {
-        if let InnerPeerPort::Peer(service,
-                                   peer,
-                                   connection,
-                                   channel_id,
-                                   port) = self.0.as_ref() {
-            //当前端口指向的是对端主机的端口
-            let _ = service
-                .0
-                .ports_map
-                .remove(&(peer.clone(), channel_id.clone()));
-            let _ = service
-                .0
-                .ports
-                .remove(&(peer.clone(), *port));
-
-            //关闭连接对端主机端口的通道
-            if let Some(terminal) = service.get_terminal() {
-                if let Err(e) = terminal.close_channel_to(peer, channel_id.clone()) {
-                    error!("Unregister peer port failed, local: {:?}, peer: {:?}, port: {:?}, connection: {:?}, channel_id: {:?}, reason: {:?}",
-                        service.local_host(),
-                        peer,
-                        port,
-                        connection,
-                        channel_id,
-                        e);
-                    return;
-                }
-            }
-
-            info!("Unregister peer port successed, local: {:?}, peer: {:?}, port: {:?}, connection: {:?}, channel_id: {:?}",
-                service.local_host(),
-                peer,
-                port,
-                connection,
-                channel_id);
-        }
-    }
-}
-
 /*
 * 对端主机端口同步方法
 */
@@ -815,7 +837,7 @@ impl PeerPort {
     /// 构建一个用于指向本地主机的服务端口
     pub fn with_local(service: PortService,
                       port: u16,
-                      sender: AsyncSender<(Option<GossipNodeID<32>>, Bytes)>) -> Self {
+                      sender: AsyncSender<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)>) -> Self {
         let inner = InnerPeerPort::Local(service,
                                          port,
                                          sender);
@@ -906,8 +928,10 @@ impl PeerPort {
         }
     }
 
-    /// 向对端主机的端口发送指定的P2P服务消息
-    pub fn send_to<B: AsRef<[u8]>>(&self, payload: B) -> Result<()> {
+    /// 向对端主机的端口发送指定序号的P2P服务消息
+    pub fn send<B: AsRef<[u8]>>(&self,
+                                index: u32,
+                                payload: B) -> Result<()> {
         match self.0.as_ref() {
             InnerPeerPort::Local(service, _port, sender) => {
                 //向本地主机的服务端口发送P2P服务消息的负载
@@ -917,7 +941,7 @@ impl PeerPort {
 
                     terminal.spawn_to(async move {
                         let _ = sender
-                            .send((None, bytes.freeze()))
+                            .send((None, index, bytes.freeze()))
                             .await;
                     });
                 }
@@ -929,6 +953,7 @@ impl PeerPort {
                 let bytes = BytesMut::from(payload.as_ref());
                 let info = P2PServiceWriteInfo {
                     port: *port,
+                    index,
                     payload: bytes,
                 };
                 send_to_service(connection, channel_id, info)
@@ -946,7 +971,7 @@ impl PeerPort {
 * 对端主机端口异步方法
 */
 impl PeerPort {
-    /// 获取与端口所在对端主机的故障估值
+    /// 获取端口所在对端主机的故障估值
     pub async fn peer_failure(&self) -> Option<f64> {
         if let InnerPeerPort::Peer(service, peer, _connection, _channel_id, _port) = self.0.as_ref() {
             //是对端主机的端口
@@ -960,12 +985,144 @@ impl PeerPort {
             None
         }
     }
+
+    /// 向对端主机的端口发送指定序号的P2P服务消息，并等待对端的回应消息
+    pub async fn request<B: AsRef<[u8]>>(&self,
+                                         index: u32,
+                                         payload: B,
+                                         timeout: usize) -> Result<Bytes> {
+        match self.0.as_ref() {
+            InnerPeerPort::Local(service, port, _sender) => {
+                //不允许向本地主机端口发送请求
+                Err(Error::new(ErrorKind::Other,
+                               format!("Request to peer service failed, peer: {:?}, port: {:?}, index: {:?}, timeout: {:?}, reason: disable local request",
+                                       service.local_host(),
+                                       port,
+                                       index,
+                                       timeout)))
+            },
+            InnerPeerPort::Peer(service, peer, _connection, _channel_id, port) => {
+                if let Some(terminal) = service.get_terminal() {
+                    //注册请求到端口服务的请求回应表
+                    let result = AsyncValueNonBlocking::new();
+                    let result_copy = result.clone();
+                    let service = service.clone();
+                    service
+                        .0
+                        .response_map
+                        .insert(index, result_copy);
+
+                    //设置请求超时
+                    let peer = peer.clone();
+                    let port = *port;
+                    terminal.spawn_timeout(async move {
+                        if let Some((_key, result)) = service
+                            .0
+                            .response_map
+                            .remove(&index) {
+                            //指定端口和序号的请求存在，则回应已超时
+                            result.set(Err(Error::new(ErrorKind::TimedOut,
+                                                      format!("Request to peer service failed, peer: {:?}, port: {:?}, index: {:?}, timeout: {:?}, reason: request already timeout",
+                                                              peer,
+                                                              port,
+                                                              index,
+                                                              timeout))));
+                        }
+                    }, timeout);
+
+                    //发送请求到对端主机的端口
+                    let _ = self.send(index, payload)?;
+
+                    //异步等待对端主机的回应
+                    result.await
+                } else {
+                    Err(Error::new(ErrorKind::Other,
+                                   format!("Request to peer service failed, peer: {:?}, port: {:?}, index: {:?}, timeout: {:?}, reason: terminal not exist",
+                                           peer,
+                                           port,
+                                           index,
+                                           timeout)))
+                }
+            },
+        }
+    }
 }
 
 // 内部对端主机的端口
 pub(crate) enum InnerPeerPort {
-    Local(PortService, u16, AsyncSender<(Option<GossipNodeID<32>>, Bytes)>),    //指向本地主机端口
-    Peer(PortService, GossipNodeID<32>, Connection, ChannelId, u16),            //指定向对端主机端口
+    Local(PortService, u16, AsyncSender<(Option<(GossipNodeID<32>, ReplyPeer)>, u32, Bytes)>),  //指向本地主机端口
+    Peer(PortService, GossipNodeID<32>, Connection, ChannelId, u16),                            //指定向对端主机端口
+}
+
+impl Drop for InnerPeerPort {
+    fn drop(&mut self) {
+        if let InnerPeerPort::Peer(service,
+                                   peer,
+                                   connection,
+                                   channel_id,
+                                   port) = self {
+            //当前端口指向的是对端主机的端口
+            let _ = service
+                .0
+                .ports_map
+                .remove(&(peer.clone(), channel_id.clone()));
+            let _ = service
+                .0
+                .ports
+                .remove(&(peer.clone(), *port));
+
+            //关闭连接对端主机端口的通道
+            if let Some(terminal) = service.get_terminal() {
+                if let Err(e) = terminal.close_channel_to(peer, channel_id.clone()) {
+                    error!("Unregister peer port failed, local: {:?}, peer: {:?}, port: {:?}, connection: {:?}, channel_id: {:?}, reason: {:?}",
+                        service.local_host(),
+                        peer,
+                        port,
+                        connection,
+                        channel_id,
+                        e);
+                    return;
+                }
+            }
+
+            info!("Unregister peer port successed, local: {:?}, peer: {:?}, port: {:?}, connection: {:?}, channel_id: {:?}",
+                service.local_host(),
+                peer,
+                port,
+                connection,
+                channel_id);
+        }
+    }
+}
+
+///
+/// 端口工作模式
+///
+#[derive(Debug, Clone, Copy)]
+pub enum PortMode {
+    Send = 1,   //发送
+    Request,    //请求
+    Unreliable, //不可靠
+}
+
+impl From<PortMode> for u8 {
+    fn from(value: PortMode) -> Self {
+        match value {
+            PortMode::Send => 1,
+            PortMode::Request => 2,
+            PortMode::Unreliable => 3,
+        }
+    }
+}
+
+impl From<u8> for PortMode {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => PortMode::Send,
+            2 => PortMode::Request,
+            _ => PortMode::Unreliable,
+        }
+    }
 }
 
 ///
@@ -1027,4 +1184,25 @@ impl PortEvent {
     }
 }
 
+/// 回应对端
+#[derive(Debug)]
+pub struct ReplyPeer(Connection, ChannelId, u32);
 
+impl ReplyPeer {
+    /// 获取回应消息序号
+    pub fn port(&self) -> u32 {
+        self.2
+    }
+
+    /// 回应对端
+    pub fn reply<B: AsRef<[u8]>>(self, payload: B) -> Result<()> {
+        let bytes = BytesMut::from(payload.as_ref());
+        let info = P2PServiceWriteInfo {
+            port: DEFAULT_REPLY_PORT,
+            index: self.2,
+            payload: bytes,
+        };
+
+        send_to_service(&self.0, &self.1, info)
+    }
+}

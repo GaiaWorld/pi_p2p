@@ -10,6 +10,9 @@ const SINGLE_BYTE_LEN_LIMIT: u8 = 0xfe;
 // 双字节负载长度限制
 const DOUBLE_BYTE_LEN_LIMIT: u8 = 0xff;
 
+/// 默认的服务消息发送序号，此序号表示不用回应
+pub const DEFAULT_SERVICE_SEND_INDEX: u32 = 0;
+
 ///
 /// P2P消息帧
 ///
@@ -607,16 +610,19 @@ impl P2PHeartBeatInfo {
 ///
 pub struct P2PServiceReadInfo {
     pub port:       u16,    //P2P服务端口
+    pub index:      u32,    //P2P服务消息序号
     pub payload:    Bytes,  //服务负载
 }
 
 impl<B: Buf> From<B> for P2PServiceReadInfo {
     fn from(mut value: B) -> Self {
         let port = value.get_u16_le();
+        let index = value.get_u32_le();
         let payload = value.copy_to_bytes(value.remaining());
 
         P2PServiceReadInfo {
             port,
+            index,
             payload,
         }
     }
@@ -627,6 +633,7 @@ impl<B: Buf> From<B> for P2PServiceReadInfo {
 ///
 pub struct P2PServiceWriteInfo {
     pub port:       u16,        //P2P服务端口
+    pub index:      u32,        //P2P服务消息序号
     pub payload:    BytesMut,   //服务负载
 }
 
@@ -635,6 +642,7 @@ impl From<P2PServiceWriteInfo> for Vec<u8> {
         let mut buf = Vec::new();
 
         buf.put_u16_le(value.port);
+        buf.put_u32_le(value.index);
         buf.put(value.payload);
 
         buf
@@ -646,6 +654,7 @@ impl From<P2PServiceWriteInfo> for BytesMut {
         let mut buf = BytesMut::new();
 
         buf.put_u16_le(value.port);
+        buf.put_u32_le(value.index);
         buf.put(value.payload);
 
         buf
