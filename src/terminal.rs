@@ -1185,6 +1185,14 @@ impl Terminal {
         table.len()
     }
 
+    /// 移除本地主机中指定主机的属性表
+    pub fn remove_local_host(&self, host_id: &GossipNodeID) {
+        let _ = self
+            .get_behavior()
+            .get_table()
+            .remove_private_node(&Atom::from(host_id.to_string()));
+    }
+
     /// 获取指定主机的心跳
     pub fn get_host_heartbeat(&self, host_id: &GossipNodeID) -> u64 {
         self
@@ -1798,6 +1806,7 @@ fn heartbeat<R>(rt: R,
 }
 
 // 异步定时整理本地P2P终端
+// TODO 使用pi_assetes来处理过期的连接，被gc的主机需要从本地私有属性表中移除...
 fn collect<R>(rt: R,
               terminal: Terminal,
               seed_amount: usize,
@@ -1819,6 +1828,12 @@ fn collect<R>(rt: R,
                     .lock()
                     .await
                     .update_node_liveliness(&host);
+
+                //从本地主机属性表中移除已回收的主机
+                let hosts = terminal.recycled_hosts().await;
+                for host in hosts {
+                    terminal.remove_local_host(&host);
+                }
             }
 
             rt
@@ -1844,6 +1859,12 @@ fn collect<R>(rt: R,
 
         //更新本地心跳
         table.upgrade_local_heartbeat();
+
+        //从本地主机属性表中移除已回收的主机
+        let hosts = terminal.recycled_hosts().await;
+        for host in hosts {
+            terminal.remove_local_host(&host);
+        }
 
         //与种子主机进行同步
         let real_seed_amount = if seed_amount == 0 {
