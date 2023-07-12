@@ -2,6 +2,7 @@ use std::thread;
 use std::sync::Arc;
 use std::str::FromStr;
 use std::time::Duration;
+use std::convert::TryFrom;
 use std::net::{SocketAddr, IpAddr};
 
 use futures::future::{FutureExt, LocalBoxFuture};
@@ -2453,6 +2454,234 @@ fn test_request_port() {
                             }
                         },
                     }
+                },
+            }
+        });
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+//首先启动A主机，再启动B主机
+#[test]
+fn test_service_a() {
+    //启动日志系统
+    env_logger::builder().format_timestamp_millis().init();
+
+    let rt = MultiTaskRuntimeBuilder::default().build();
+
+    //A主机
+    let (send, recv_a) = bounded(1);
+    {
+        let server_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let server_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+        let client_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let client_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+
+        let rt_copy = rt.clone();
+        rt.spawn(rt.alloc(), async move {
+            let mut builder = TerminalBuilder::default();
+            builder = builder
+                .bind_runtime(rt_copy.clone(),
+                              server_udp_runtime,
+                              server_quic_runtimes,
+                              client_udp_runtime,
+                              client_quic_runtimes);
+            builder = builder
+                .bind_terminal_cert_and_key("./tests/ca/ca_cert.pem",
+                                            "./tests/A/a.crt",
+                                            "./tests/A/a.key");
+            builder = builder
+                .bind_server_local_udp_address(SocketAddr::new(IpAddr::from_str("192.168.35.65").unwrap(), 38080));
+            builder = builder
+                .set_client_verify_level_to_server::<&str>(None);
+            builder = builder.enable_server_verify_level_to_client();
+            builder = builder.set_failure_detector_config(8.0,
+                                                          1000,
+                                                          Duration::from_millis(10000),
+                                                          Duration::from_millis(5000),
+                                                          Duration::from_millis(30000));
+
+            let port_service = PortService::new();
+            let service = Arc::new(port_service.clone());
+            let adapter = Arc::new(P2PServiceAdapter::with_service(service.clone(), Some(5000)));
+            builder = builder.set_service(adapter.clone());
+            builder = builder.set_version(0, 1, 0);
+            let terminal = builder.build().await.unwrap();
+            terminal.startup(rt_copy.clone(),
+                             1,
+                             1,
+                             5000,
+                             5000,
+                             Some(Duration::from_millis(5000)),
+                             Duration::from_millis(30000)).await;
+            send.send(port_service).await;
+        });
+    }
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        let service_a = recv_a.recv().await.unwrap();
+        let host_a = service_a.local_host().unwrap();
+        println!("!!!!!!terminal a: {:?}", host_a);
+
+        //等待初始化后再打开端口
+        let mut count = 0;
+        while count < 1 {
+            if let Some(event) = service_a.try_poll_event() {
+                if event.is_inited() {
+                    println!("!!!!!!service a inited");
+                    count += 1;
+                }
+            }
+        }
+
+        rt_copy.spawn(rt_copy.alloc(), async move {
+            match service_a.open_port(8080, Some("test port"), PortMode::Send) {
+                Err(e) => {
+                    println!("!!!!!!open service a port failed, reason: {:?}", e);
+                },
+                Ok((self_port, pipeline)) => {
+                    println!("!!!!!!open service a port ok\n\tpeer_port: {:#?}\n\tpipeline: {:#?}\n\tports: {:#?}",
+                             self_port,
+                             pipeline,
+                             service_a.local_ports());
+
+                    while let Ok((from, index, bytes)) = pipeline.poll().await {
+                        if let Some((peer, reply_peer)) = from {
+                            println!("!!!!!!received, from: {:?}, bytes: {:?}", peer, bytes);
+                            if let Err(e) = reply_peer.reply("Hi b") {
+                                println!("!!!!!!reply failed, peer: {:?}, index: {:?}, reason: {:?}", peer, index, e);
+                            }
+                        } else {
+                            println!("!!!!!!from: None, index: {:?}, msg: {:?}",
+                                     index,
+                                     String::from_utf8_lossy(bytes.as_ref()));
+                        }
+                    }
+                },
+            }
+        });
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+//首先启动A主机，再启动B主机
+#[test]
+fn test_service_b() {
+    //启动日志系统
+    env_logger::builder().format_timestamp_millis().init();
+
+    let rt = MultiTaskRuntimeBuilder::default().build();
+
+    //B主机
+    let (send, recv_b) = bounded(1);
+    {
+        let server_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let server_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+        let client_udp_runtime = AsyncRuntimeBuilder::default_local_thread(None, None);
+        let client_quic_runtimes = vec![AsyncRuntimeBuilder::default_local_thread(None, None)];
+
+        let rt_copy = rt.clone();
+        rt.spawn(rt.alloc(), async move {
+            let mut builder = TerminalBuilder::default();
+            builder = builder
+                .bind_runtime(rt_copy.clone(),
+                              server_udp_runtime,
+                              server_quic_runtimes,
+                              client_udp_runtime,
+                              client_quic_runtimes);
+            builder = builder
+                .bind_terminal_cert_and_key("./tests/ca/ca_cert.pem",
+                                            "./tests/B/b.crt",
+                                            "./tests/B/b.key");
+            builder = builder
+                .bind_server_local_udp_address(SocketAddr::new(IpAddr::from_str("192.168.35.65").unwrap(), 38081));
+            builder = builder
+                .set_client_verify_level_to_server::<&str>(None);
+            builder = builder.enable_server_verify_level_to_client();
+            builder = builder
+                .add_seed_host_address("VmvoecS91YdyzncoXp94iFgkmCu82SitFTfFYT4DeKR",
+                                       IpAddr::from_str("192.168.35.65").unwrap(),
+                                       38080);
+            builder = builder.set_failure_detector_config(8.0,
+                                                          1000,
+                                                          Duration::from_millis(10000),
+                                                          Duration::from_millis(5000),
+                                                          Duration::from_millis(30000));
+
+            let port_service = PortService::new();
+            let service = Arc::new(port_service.clone());
+            let adapter = Arc::new(P2PServiceAdapter::with_service(service.clone(), Some(5000)));
+            builder = builder.set_service(adapter.clone());
+            builder = builder.set_version(0, 1, 0);
+            let terminal = builder.build().await.unwrap();
+            terminal.startup(rt_copy.clone(),
+                             1,
+                             1,
+                             5000,
+                             5000,
+                             Some(Duration::from_millis(5000)),
+                             Duration::from_millis(30000)).await;
+            send.send(port_service).await;
+        });
+    }
+
+    let rt_copy = rt.clone();
+    rt.spawn(rt.alloc(), async move {
+        let service_b = recv_b.recv().await.unwrap();
+        let host_b = service_b.local_host().unwrap();
+        println!("!!!!!!terminal b: {:?}", host_b);
+
+        //等待初始化后再打开端口
+        let mut count = 0;
+        while count < 1 {
+            if let Some(event) = service_b.try_poll_event() {
+                if event.is_inited() {
+                    println!("!!!!!!service b inited");
+                    count += 1;
+                }
+            }
+        }
+
+        let rt_clone = rt_copy.clone();
+        rt_copy.spawn(rt_copy.alloc(), async move {
+            let host_a = GossipNodeID::try_from("VmvoecS91YdyzncoXp94iFgkmCu82SitFTfFYT4DeKR/0".to_string()).unwrap();
+            match service_b
+                .connect_to(&host_a,
+                            8080,
+                            5000)
+                .await {
+                Err(e) => {
+                    println!("!!!!!!connect to peer service port failed, peer: {:?}, port: 8080, reason: {:?}",
+                             host_a,
+                             e);
+                },
+                Ok(peer_port) => {
+                    let service_b_copy = service_b.clone();
+                    let peer_port_copy = peer_port.clone();
+                    rt_clone.spawn(rt_clone.alloc(), async move {
+                        while let Ok(event) = service_b_copy.poll_event().await {
+                            if let PortEvent::Handshaked(peer) = event {
+                                println!("!!!!!!handshaked, peer: {:?}", peer);
+                                if peer_port_copy.peer().unwrap() == peer {
+                                    //与端口所在的对端主机已握手
+                                    break;
+                                }
+                            }
+                        }
+
+                        let mut index = 0;
+                        loop {
+                            index += 1;
+                            let r = peer_port_copy
+                                .request(index,
+                                         "Hello a from b".as_bytes(),
+                                         5000).await;
+                            println!("######response from a, index: {:?}, r: {:?}", index, r);
+                        }
+                    });
                 },
             }
         });

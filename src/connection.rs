@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::fmt::{Debug, Formatter};
 use std::io::{Error, Result, ErrorKind};
 
-use dashmap::DashMap;
 use quinn_proto::{StreamId, Dir};
 use bytes::{Buf, Bytes};
 

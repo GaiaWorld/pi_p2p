@@ -18,7 +18,7 @@ use ciborium::Value;
 use log::{info, error};
 
 use crate::{connection::{ChannelId, Connection},
-            frame::{DEFAULT_SERVICE_SEND_INDEX, P2PFrame, P2PHandShakeInfo, P2PServiceReadInfo, P2PServiceWriteInfo},
+            frame::{P2PFrame, P2PHandShakeInfo, P2PServiceReadInfo, P2PServiceWriteInfo},
             service::{DEFAULT_CONNECT_HANDSHAKE_TAG, P2PService, P2PServiceListener, send_to_service},
             terminal::Terminal};
 

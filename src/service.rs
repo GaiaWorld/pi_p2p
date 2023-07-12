@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::convert::TryFrom;
-use std::net::{SocketAddr, IpAddr};
+use std::net::IpAddr;
 use std::result::Result as GenResult;
 use std::io::{Cursor, Result, Error, ErrorKind};
 
@@ -13,18 +13,14 @@ use quic::{AsyncService, SocketEvent, SocketHandle,
 use pi_gossip::{GossipNodeID, GossipContext,
                 transport::{Transport, GossipTid, GossipSendBinary, HandlePullBinary, HandlePushPullBinary},
                 service::{PullBehavior, PushBehavior, PushPullBehavior, ServiceContext},
-                scuttlebutt::{table::Table,
-                              core::{DEFAULT_PULL_SYNC_REQ_TAG, DEFAULT_PULL_SYNC_ACK_TAG, DEFAULT_PUSH_SYNC_TAG,
-                                     Scuttlebutt}}};
+                scuttlebutt::{core::{DEFAULT_PULL_SYNC_REQ_TAG, DEFAULT_PULL_SYNC_ACK_TAG, DEFAULT_PUSH_SYNC_TAG}}};
 use pi_async::rt::{AsyncRuntime,
                    multi_thread::MultiTaskRuntime};
 use pi_gossip::scuttlebutt::table::{Key, NodeChangingEvent, TableChangeMonitor};
 use pi_hash::XHashMap;
-use pi_atom::Atom;
 use parking_lot::RwLock;
 use dashmap::DashMap;
-use bytes::{Buf, Bytes, BytesMut};
-use futures::StreamExt;
+use bytes::{Buf, BytesMut};
 use log::{debug, warn, error};
 
 use crate::{connection::{Connection, ChannelId, PeerSocketHandle},
@@ -386,12 +382,14 @@ impl AsyncService for P2PServiceAdapter {
                                       stream_id: StreamId,
                                       _stream_type: Dir,
                                       result: Result<()>) -> LocalBoxFuture<'static, ()> {
+        let adapter = self.clone();
         async move {
             if result.is_ok() {
-                //开始首次读
-                handle
-                    .set_ready(stream_id,
-                               QuicSocketReady::Readable);
+                //对端打开扩展流成功
+                if let Some(terminal) = adapter.get_service().get_terminal() {
+                    terminal.insert_channel(handle.get_uid(),
+                                            ChannelId::new(stream_id.0));
+                }
             }
         }.boxed_local()
     }

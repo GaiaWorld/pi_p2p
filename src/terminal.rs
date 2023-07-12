@@ -9,9 +9,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 use std::sync::{Arc,
                 atomic::{AtomicBool, AtomicUsize, Ordering}};
-use std::io::{BufRead, BufReader, Result, Error, ErrorKind, Cursor};
+use std::io::{BufReader, Result, Error, ErrorKind, Cursor};
 
-use futures::future::{BoxFuture, LocalBoxFuture};
+use futures::future::BoxFuture;
 use parking_lot::RwLock;
 use async_lock::Mutex;
 use dashmap::DashMap;
@@ -20,14 +20,10 @@ use rustls;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use x509_parser::{pem::Pem,
                   public_key::PublicKey};
-use curve25519_parser::parse_openssl_25519_privkey;
-use ciborium::{Value,
-               value::Integer};
+use ciborium::Value;
 use futures::FutureExt;
-use quinn_proto::{EndpointConfig, TransportConfig, Dir, StreamId, VarInt};
+use quinn_proto::{EndpointConfig, TransportConfig, VarInt};
 use bytes::BytesMut;
-use der_parser::nom::Or;
-use der_parser::nom::sequence::terminated;
 use rand::prelude::*;
 use log::{debug, info, error};
 use pi_async::prelude::MultiTaskRuntime;
@@ -35,21 +31,17 @@ use pi_async::prelude::MultiTaskRuntime;
 use pi_atom::Atom;
 use pi_async::rt::{AsyncRuntime,
                    serial_local_thread::LocalTaskRuntime};
-use pi_gossip::{FromPublicKey, GossipNodeID, GossipContext,
+use pi_gossip::{GossipNodeID, GossipContext,
                 summary::SummaryVesrion,
                 increase::IncreaseVesrion,
-                transport::{Transport, GossipTid, GossipSendBinary, HandlePullBinary, HandlePushPullBinary},
-                service::{PullBehavior, PushBehavior, PushPullBehavior, ServiceContext, SyncStatistics},
+                transport::{GossipTid, GossipSendBinary},
+                service::{ServiceContext, SyncStatistics},
                 scuttlebutt::{phi::{PhiFailureDetector, PhiFailureDetectorConfig},
                               table::Key,
-                              core::{DEFAULT_PULL_SYNC_REQ_TAG, DEFAULT_PULL_SYNC_ACK_TAG, DEFAULT_PUSH_SYNC_TAG,
-                                     Scuttlebutt}}};
+                              core::Scuttlebutt}};
 use udp::terminal::UdpTerminal;
-use quic::{AsyncService, SocketHandle, SocketEvent,
-           connect::QuicSocket,
-           client::{QuicClient, ServerCertVerifyLevel},
-           server::{QuicListener, ClientCertVerifyLevel},
-           utils::{QuicSocketReady, load_key_file}};
+use quic::{client::{QuicClient, ServerCertVerifyLevel},
+           server::{QuicListener, ClientCertVerifyLevel}};
 
 use crate::{crypto::{ClientCertVerifier, ServerCertVerifier, host_id_to_host_dns},
             connection::{Connection, PeerSocketHandle, Channel},
