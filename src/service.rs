@@ -176,6 +176,7 @@ pub trait P2PService: Send + Sync + 'static {
 
     /// 当前连接的指定通道已关闭
     fn closed_channel(&self,
+                      peer: GossipNodeID,
                       connection: Connection,
                       channel_id: ChannelId,
                       code: u32,
@@ -183,7 +184,7 @@ pub trait P2PService: Send + Sync + 'static {
 
     /// 当前连接已关闭
     fn closed(&self,
-              connection: Connection,
+              peer: GossipNodeID,
               code: u32,
               result: Result<()>) -> LocalBoxFuture<'static, ()>;
 }
@@ -522,33 +523,66 @@ impl AsyncService for P2PServiceAdapter {
                 .get_terminal()
                 .unwrap();
 
-            let host_id = if let Some(host_id) = terminal.unbind_peer_id(&connection_id) {
-                //当前连接已解除绑定
-                host_id
-            } else {
-                //当前连接未握手，则立即退出
-                return;
-            };
-
-            let connection = if let Some(connection) = terminal.unregister_connection(&host_id) {
-                //当前连接已注销
-                connection
-            } else {
-                //当前连接未注销，则立即退出
-                return;
-            };
-
             if let Some(stream_id) = stream_id {
-                host.get_service()
-                    .closed_channel(connection,
-                                    stream_id.0.into(),
-                                    code,
-                                    result).await;
+                //关闭指定连接的指定流
+                if let Some(main_stream_id) = handle.get_main_stream_id() {
+                    if &stream_id == main_stream_id {
+                        //关闭的是主流，则立即关闭连接
+                        let host_id = if let Some(host_id) = terminal.unbind_peer_id(&connection_id) {
+                            //当前连接已解除绑定
+                            host_id
+                        } else {
+                            //当前连接未握手，则立即退出
+                            return;
+                        };
+
+                        let connection = if let Some(connection) = terminal.unregister_connection(&host_id) {
+                            //当前连接已注销
+                            connection
+                        } else {
+                            //当前连接未注销，则立即退出
+                            return;
+                        };
+
+                        host.get_service()
+                            .closed_channel(host_id,
+                                            connection,
+                                            stream_id.0.into(),
+                                            code,
+                                            result)
+                            .await;
+                    }
+                } else {
+                    //关闭的是扩展流
+                    if let Some(host_id) = terminal.get_peer_host_id(&connection_id) {
+                        if let Some(connection) = terminal.get_connection(&host_id) {
+                            host.get_service()
+                                .closed_channel(host_id,
+                                                connection,
+                                                stream_id.0.into(),
+                                                code,
+                                                result)
+                                .await;
+                        }
+                    }
+                }
             } else {
+                //关闭指定连接的所有流
+                let host_id = if let Some(host_id) = terminal.unbind_peer_id(&connection_id) {
+                    //当前连接已解除绑定
+                    host_id
+                } else {
+                    //当前连接未握手，则立即退出
+                    return;
+                };
+
+                let _ = terminal.unregister_connection(&host_id);
+
                 host.get_service()
-                    .closed(connection,
+                    .closed(host_id,
                             code,
-                            result).await;
+                            result)
+                    .await;
             }
         }.boxed_local()
     }

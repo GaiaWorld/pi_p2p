@@ -12,7 +12,8 @@ use pi_async::rt::AsyncValueNonBlocking;
 use pi_gossip::{GossipNodeID,
                 scuttlebutt::table::{Key, NodeChangingEvent}};
 use pi_atom::Atom;
-use dashmap::DashMap;
+use dashmap::{DashMap,
+              mapref::entry::Entry};
 use bytes::{Bytes, BytesMut};
 use ciborium::Value;
 use log::{info, error};
@@ -169,61 +170,46 @@ impl P2PService for PortService {
     }
 
     fn closed_channel(&self,
+                      peer: GossipNodeID<32>,
                       connection: Connection,
                       channel_id: ChannelId,
                       code: u32,
                       result: Result<()>) -> LocalBoxFuture<'static, ()> {
-        if let Some(terminal) = self.get_terminal() {
-            if let Some(peer) = terminal.get_peer_host_id(&connection.get_uid()) {
-                let service = self.clone();
-
-                return async move {
-                    let _ = service
-                        .0
-                        .event_sent
-                        .send(PortEvent::ClosedChannel(peer.clone(),
-                                                       connection.channels_len(),
-                                                       code,
-                                                       result))
-                        .await;
-
-                    //注销已连接对端主机的端口
-                    if let Some(((peer, _channel_id), port)) = service.0.ports_map.remove(&(peer, channel_id)) {
-                        if let Some((_key, peer_port)) = service.0.ports.remove(&(peer, port)) {
-                            peer_port.close();
-                        }
-                    }
-                }.boxed_local();
-            }
-        }
+        let service = self.clone();
 
         async move {
+            let _ = service
+                .0
+                .event_sent
+                .send(PortEvent::ClosedChannel(peer.clone(),
+                                               connection.channels_len(),
+                                               code,
+                                               result))
+                .await;
 
+            //注销已连接对端主机的端口
+            if let Some(((peer, _channel_id), port)) = service.0.ports_map.remove(&(peer, channel_id)) {
+                if let Some((_key, peer_port)) = service.0.ports.remove(&(peer, port)) {
+                    peer_port.close();
+                }
+            }
         }.boxed_local()
     }
 
     fn closed(&self,
-              connection: Connection,
+              peer: GossipNodeID<32>,
               code: u32,
               result: Result<()>) -> LocalBoxFuture<'static, ()> {
-        if let Some(terminal) = self.get_terminal() {
-            if let Some(peer) = terminal.get_peer_host_id(&connection.get_uid()) {
-                let service = self.clone();
-
-                return async move {
-                    let _ = service
-                        .0
-                        .event_sent
-                        .send(PortEvent::Closed(peer,
-                                                code,
-                                                result))
-                        .await;
-                }.boxed_local();
-            }
-        }
+        let service = self.clone();
 
         async move {
-
+            let _ = service
+                .0
+                .event_sent
+                .send(PortEvent::Closed(peer,
+                                        code,
+                                        result))
+                .await;
         }.boxed_local()
     }
 }
@@ -826,6 +812,27 @@ impl Debug for PeerPort {
                        channel_id,
                        port)
             },
+        }
+    }
+}
+
+impl Drop for PeerPort {
+    fn drop(&mut self) {
+        if let InnerPeerPort::Peer(service, peer, _connection, _channel_id, port) = self.0.as_ref() {
+            match service.0.ports.entry((peer.clone(), *port)) {
+                Entry::Occupied(o) => {
+                    //还未从本地端口服务的端口表中移除对应的对端主机端口
+                    let value = o.get();
+                    if Arc::strong_count(&value.0) <= 2 {
+                        //外部握住的对端主机端口已全部释放，则从本地端口服务的端口表中移除对应的对端主机端口
+                        o.remove();
+                    }
+                },
+                Entry::Vacant(_v) => {
+                    //已从本地端口服务的端口表中移除对应的对端主机端口
+                    return;
+                },
+            }
         }
     }
 }
